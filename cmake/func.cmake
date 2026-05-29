@@ -75,11 +75,9 @@ function(op_add_subdirectory OP_LIST OP_DIR_LIST)
         "${CMAKE_CURRENT_SOURCE_DIR}/experimental/posembedding/**/op_host/CMakeLists.txt"
         )
     else()
-        file(GLOB OP_HOST_CMAKE_FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/chunk_gated_delta_rule/**/op_host/CMakeLists.txt"
-        "${CMAKE_CURRENT_SOURCE_DIR}/chunk_gated_delta_rule/**/CMakeLists.txt"
-        "${CMAKE_CURRENT_SOURCE_DIR}/gmm/**/op_host/CMakeLists.txt"
-        "${CMAKE_CURRENT_SOURCE_DIR}/gmm/**/CMakeLists.txt"
+        file(GLOB_RECURSE OP_HOST_CMAKE_FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/fla/ops/ascendc/CMakeLists.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/gmm/CMakeLists.txt"
         )
     endif()
 
@@ -91,6 +89,10 @@ function(op_add_subdirectory OP_LIST OP_DIR_LIST)
             get_filename_component(OP_DIR "${OP_CMAKE_FILE}" DIRECTORY)
         endif()
         get_filename_component(OP_NAME "${OP_DIR}" NAME)
+
+        if ("${OP_CMAKE_FILE}" MATCHES "/tests/" OR "${OP_DIR}" MATCHES "/tests/")
+            continue()
+        endif()
 
         if (NOT BUILD_OPEN_PROJECT)
             if (EXISTS ${TOP_DIR}/asl/ops/cann/ops/built-in/tbe/impl/ascendc/${OP_NAME})

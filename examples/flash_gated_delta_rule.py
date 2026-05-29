@@ -15,12 +15,12 @@ import torch
 import torch.nn as nn
 import torch_npu
 
-from triton_ops.triton_core.causal_conv1d import causal_conv1d_triton
-from triton_ops.triton_core.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
-from triton_ops.triton_core.cumsum import chunk_local_cumsum
-from triton_ops.triton_core.l2norm import l2norm_bwd, l2norm_fwd
-from triton_ops.triton_core.solve_tril_fast import solve_tril_npu as solve_tril
-from triton_ops.triton_core.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
+from fla.ops.triton.triton_core.causal_conv1d import causal_conv1d_triton
+from fla.ops.triton.triton_core.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
+from fla.ops.triton.triton_core.cumsum import chunk_local_cumsum
+from fla.ops.triton.triton_core.l2norm import l2norm_bwd, l2norm_fwd
+from fla.ops.triton.triton_core.solve_tril_fast import solve_tril_npu as solve_tril
+from fla.ops.triton.triton_core.utils import autocast_custom_bwd, autocast_custom_fwd, input_guard
 
 
 _disable_compile = getattr(getattr(torch, "compiler", None), "disable", lambda fn: fn)
@@ -92,7 +92,7 @@ def _next_power_of_2(value: int) -> int:
 
 
 def _cumsum_block_t(g: torch.Tensor, chunk_size: int) -> int:
-    # Keep this aligned with triton_ops.triton_core.cumsum.chunk_local_cumsum_scalar.
+    # Keep this aligned with fla.ops.triton.triton_core.cumsum.chunk_local_cumsum_scalar.
     h = int(g.shape[-1])
     return _next_power_of_2((1 << 17) // max(1, h * int(chunk_size)))
 
