@@ -104,6 +104,12 @@ if (BUILD_OPEN_PROJECT)
 
     # op proto
     add_library(cust_proto SHARED)
+    add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/cust_proto_stub.cpp
+            COMMAND touch ${CMAKE_CURRENT_BINARY_DIR}/cust_proto_stub.cpp
+    )
+    target_sources(cust_proto PRIVATE
+            ${CMAKE_CURRENT_BINARY_DIR}/cust_proto_stub.cpp
+    )
     target_compile_options(cust_proto PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-std=c++11>
             -fvisibility=hidden
