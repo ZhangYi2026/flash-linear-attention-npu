@@ -1,5 +1,19 @@
 # Pull Request 模板
 
+## 合入门禁提醒
+
+> **NPU CI 不会在 PR 新建、重开或 push 新 commit 时自动执行。**
+>
+> 合入前，当前 head commit 必须具备成功的 `NPU CI / manual` 状态；如果本 PR 后续更新了 commit，旧 commit 的 CI 结果不再有效，需要维护者重新触发。即使已有 2 个维护账号检视通过，只要当前 commit 未完成 NPU CI，仍不可合入（`weinachuan` 可按仓库保护规则 bypass）。
+>
+> 触发方式：
+>
+> - GitHub `Actions` 页面选择 `NPU CI`，点击 `Run workflow`，填写本 PR 编号。
+> - 在 PR 评论区发送 `/run-npu-ci quick` 或 `/run-npu-ci full`。
+> - NPU CI 会固定执行 `examples/flash_gated_delta_rule.py`，默认保持该用例原始 shape；通常不要填写 `example_args`，除非维护者明确要求追加已批准的泛化场景参数。
+> - Example ST 必须使用 Ascend PyTorch `v26.1.0-beta.1` release family 的配套 `torch_npu` wheel（已包含 `torchnpugen` 并修复 GDN stream 同步问题）；PyTorch 小版本可按环境选择，但不要拉取 `op-plugin` 重新编译或安装不属于该 release family 的旧版 `torch-npu`。
+> - NPU CI 部署与排障教程见 [`docs/npu-ci-deployment-guide.md`](docs/npu-ci-deployment-guide.md)。
+
 ## 关联 Issue / 背景
 
 - 关联 Issue:
@@ -22,7 +36,7 @@
 
 - 涉及算子名称:
 - 涉及目录 / 文件:
-- 责任人 / 提交人:
+- 责任人 / 提交人: <!-- pr-author -->
 - 修改范围:
   - [ ] `op_host` / 算子定义
   - [ ] `InferShape` / 参数校验
@@ -40,7 +54,8 @@
   - [ ] 否
   - [ ] 是，请说明影响面、兼容策略和回归范围:
 
-## 版本与产品编译矩阵
+<details>
+<summary>版本与产品编译矩阵</summary>
 
 本 PR 必须保证配套版本满足以下编译要求。当前工程中产品与 `--soc` 参数的对应关系如下:
 
@@ -50,7 +65,10 @@
 | A3 | `ascend910_93` |
 | A5 | `ascend950` |
 
-## 验证方法
+</details>
+
+<details>
+<summary>验证方法</summary>
 
 请按本节方法执行验证，并把实际命令、结果和日志填写到后续矩阵中。`<op_name>` 替换为本 PR 修改的算子名；多个算子用逗号分隔，或逐个填写。
 
@@ -97,20 +115,6 @@ bash build.sh --pkg --soc=ascend950 --ops=<op_name> --vendor_name=fla_npu
 
 根据本 PR 修改范围选择对应测试入口；涉及多个入口时均需执行。
 
-工程 UT:
-
-```sh
-bash build.sh -u --ops=<op_name> --soc=<soc>
-```
-
-按模块精确验证:
-
-```sh
-bash build.sh --ophost_test --ops=<op_name> --soc=<soc>
-bash build.sh --opapi_test --ops=<op_name> --soc=<soc>
-bash build.sh --opkernel_test --ops=<op_name> --soc=<soc>
-```
-
 `torch_custom` 适配验证:
 
 ```sh
@@ -147,17 +151,20 @@ bash build_and_test.sh
 python examples/flash_gated_delta_rule.py
 ```
 
-如本 PR 修改了 aclnn example 或新增了算子 example，同时执行:
-
-```sh
-bash build.sh --run_example <op_name> eager cust --vendor_name=fla_npu --soc=<soc>
-```
+也可以由维护者触发 CI 验证：`/run-npu-ci quick`。CI 固定执行 `examples/flash_gated_delta_rule.py`，默认保持该用例原始 shape，仅覆盖容器内逻辑设备号 `--device`。
 
 通过标准:
 
 - 命令退出码为 0
 - 端到端结果与 golden / PyTorch 参考实现一致
 - 日志无精度异常、运行时异常、fallback 异常或 device error
+
+</details>
+
+<details>
+<summary>修改算子测试</summary>
+
+本 PR 修改到的算子必须完成对应 test 测试，并在 A2 / A3 / A5 覆盖验证结果。请填写实际执行命令，避免填写当前工程不支持的占位命令。
 
 ### CANN 8.5 及以上
 
@@ -180,22 +187,23 @@ bash build.sh --run_example <op_name> eager cust --vendor_name=fla_npu --soc=<so
 
 如结果为“未通过”或“未执行”，请在日志列填写原因、当前阻塞点、责任人和预计补齐时间。
 
-## 修改算子测试
-
-本 PR 修改到的算子必须完成对应 test 测试，并在 A2 / A3 / A5 覆盖验证结果。
+### 单算子测试结果
 
 | 产品 | `--soc` | 实际执行命令 | 结果 | 日志 / 精度结论 |
 | --- | --- | --- | --- | --- |
-| A2 | `ascend910b` | `bash build.sh -u --ops=<op_name> --soc=ascend910b` | 通过 / 未通过 / 未执行 |  |
-| A3 | `ascend910_93` | `bash build.sh -u --ops=<op_name> --soc=ascend910_93` | 通过 / 未通过 / 未执行 |  |
-| A5 | `ascend950` | `bash build.sh -u --ops=<op_name> --soc=ascend950` | 通过 / 未通过 / 未执行 |  |
+| A2 | `ascend910b` |  | 通过 / 未通过 / 未执行 |  |
+| A3 | `ascend910_93` |  | 通过 / 未通过 / 未执行 |  |
+| A5 | `ascend950` |  | 通过 / 未通过 / 未执行 |  |
 
 - 精度对比:
 - 性能对比:
 - 边界 / 异常场景:
 - 未覆盖风险:
 
-## 整体 Example ST 验证
+</details>
+
+<details>
+<summary>整体 Example ST 验证</summary>
 
 整体 example 的 ST 测试必须在 A2 / A3 / A5 通过。
 
@@ -208,6 +216,8 @@ bash build.sh --run_example <op_name> eager cust --vendor_name=fla_npu --soc=<so
 - 端到端场景说明:
 - 与本 PR 修改算子的关联:
 - 未覆盖原因及补充计划:
+
+</details>
 
 ## 兼容性、风险与回退
 

@@ -1,0 +1,230 @@
+name: NPU CI
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to run NPU CI for"
+        required: true
+      ci_mode:
+        description: "CI mode: quick or full"
+        required: false
+        default: quick
+      ops:
+        description: "Optional comma-separated operator list"
+        required: false
+        default: ''
+      example_args:
+        description: "Optional extra args for examples/flash_gated_delta_rule.py; empty keeps original shape"
+        required: false
+        default: ''
+
+jobs:
+  prepare:
+    name: prepare
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        startsWith(github.event.comment.body, '/run-npu-ci')
+      )
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+      statuses: write
+    outputs:
+      should_run: ${{ steps.prepare.outputs.should_run }}
+      pr_number: ${{ steps.prepare.outputs.pr_number }}
+      head_repo: ${{ steps.prepare.outputs.head_repo }}
+      head_sha: ${{ steps.prepare.outputs.head_sha }}
+      ci_mode: ${{ steps.prepare.outputs.ci_mode }}
+      ops: ${{ steps.prepare.outputs.ops }}
+      example_args: ${{ steps.prepare.outputs.example_args }}
+    steps:
+      - name: Resolve PR and requested CI mode
+        id: prepare
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const maintainers = new Set([
+              'juyangokok',
+              'weinachuan',
+              'weiwei-612',
+              'woey',
+              'zhangshuolei-hfut',
+              'chen-linxin',
+            ]);
+            const actor = context.actor;
+            if (!maintainers.has(actor)) {
+              core.setFailed(`${actor} is not allowed to trigger NPU CI.`);
+              return;
+            }
+
+            const contextName = 'NPU CI / manual';
+            let prNumber;
+            let ciMode = 'quick';
+            let ops = '';
+            let exampleArgs = '';
+
+            if (context.eventName === 'workflow_dispatch') {
+              prNumber = Number(core.getInput('pr_number', { required: true }));
+              ciMode = core.getInput('ci_mode') || 'quick';
+              ops = core.getInput('ops') || '';
+              exampleArgs = core.getInput('example_args') || '';
+            } else {
+              prNumber = context.payload.issue.number;
+              const body = (context.payload.comment.body || '').trim();
+              const parts = body.split(/\s+/).slice(1);
+              for (const part of parts) {
+                if (part === 'quick' || part === 'full') {
+                  ciMode = part;
+                } else if (part.startsWith('ops=')) {
+                  ops = part.slice('ops='.length);
+                } else if (part.startsWith('example_args=')) {
+                  exampleArgs = part.slice('example_args='.length);
+                }
+              }
+            }
+
+            if (!Number.isInteger(prNumber) || prNumber <= 0) {
+              core.setFailed(`Invalid PR number: ${prNumber}`);
+              return;
+            }
+            if (!['quick', 'full'].includes(ciMode)) {
+              core.setFailed(`Unsupported CI mode: ${ciMode}`);
+              return;
+            }
+            if (/[\r\n]/.test(exampleArgs)) {
+              core.setFailed('example_args must be a single line.');
+              return;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+            if (pr.draft) {
+              core.setFailed(`PR #${prNumber} is draft; mark it ready for review before running NPU CI.`);
+              return;
+            }
+
+            const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: pr.head.sha,
+              per_page: 100,
+            });
+            const latestManualCi = statuses.find((status) => status.context === contextName);
+            const latestPassedWithExample = latestManualCi &&
+              latestManualCi.state === 'success' &&
+              (latestManualCi.description || '').includes('+example');
+            if (latestPassedWithExample) {
+              core.notice(`NPU CI already passed for ${pr.head.sha}; skipping duplicate run.`);
+              if (context.eventName === 'issue_comment') {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: `NPU CI already passed for \`${pr.head.sha}\`; no new run was started.`,
+                });
+              }
+              core.setOutput('should_run', 'false');
+              core.setOutput('pr_number', String(prNumber));
+              core.setOutput('head_repo', pr.head.repo.full_name);
+              core.setOutput('head_sha', pr.head.sha);
+              core.setOutput('ci_mode', ciMode);
+              core.setOutput('ops', ops);
+              core.setOutput('example_args', exampleArgs);
+              return;
+            }
+
+            const targetUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: pr.head.sha,
+              state: 'pending',
+              context: contextName,
+              description: `NPU CI requested by @${actor} (${ciMode}+example)`,
+              target_url: targetUrl,
+            });
+            if (context.eventName === 'issue_comment') {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: `NPU CI started for \`${pr.head.sha}\` in \`${ciMode}\` mode${ops ? ` with ops=\`${ops}\`` : ''} with mandatory Example ST.`,
+              });
+            }
+
+            core.setOutput('should_run', 'true');
+            core.setOutput('pr_number', String(prNumber));
+            core.setOutput('head_repo', pr.head.repo.full_name);
+            core.setOutput('head_sha', pr.head.sha);
+            core.setOutput('ci_mode', ciMode);
+            core.setOutput('ops', ops);
+            core.setOutput('example_args', exampleArgs);
+
+  ascend-npu:
+    name: ascend-npu
+    needs: prepare
+    if: needs.prepare.outputs.should_run == 'true'
+    runs-on: [self-hosted, linux, arm64, npu, flash-linear-attention-npu]
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      statuses: write
+    env:
+      CI_MODE: ${{ needs.prepare.outputs.ci_mode }}
+      CI_OPS: ${{ needs.prepare.outputs.ops }}
+      CI_RUN_EXAMPLE_ST: 'true'
+      CI_EXAMPLE_ARGS: ${{ needs.prepare.outputs.example_args }}
+      CI_IMAGE: fla-npu-ci:8.5.0-910b
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ needs.prepare.outputs.head_repo }}
+          ref: ${{ needs.prepare.outputs.head_sha }}
+          fetch-depth: 1
+          path: repo
+
+      - name: Checkout trusted CI scripts
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          path: trusted-ci
+
+      - name: Use trusted CI scripts
+        run: |
+          rm -rf repo/ci
+          cp -a trusted-ci/ci repo/ci
+
+      - name: Run NPU CI container
+        working-directory: repo
+        run: bash ci/run_ci_container.sh
+
+      - name: Publish NPU CI status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
+            const mode = '${{ needs.prepare.outputs.ci_mode }}';
+            const targetUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: '${{ needs.prepare.outputs.head_sha }}',
+              state,
+              context: 'NPU CI / manual',
+              description: state === 'success' ? `NPU CI passed (${mode}+example)` : `NPU CI failed (${mode}+example)`,
+              target_url: targetUrl,
+            });
