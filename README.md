@@ -94,6 +94,8 @@ python examples/flash_gated_delta_rule.py
 
 本仓提供基于 GitHub self-hosted runner 的 NPU CI 配置，当前规划部署在 `192.168.9.221` 的 `/workspace` 目录下，后续迁移时只需要迁移 runner 与 Docker 镜像/脚本。
 
+为节省 NPU 资源，CI 不会在 PR 新建、重开或提交新 commit 时自动执行。PR 合入门禁会要求当前 head commit 存在 `NPU CI / manual` 成功状态；如果 PR 更新了 commit，旧 commit 上的 CI 成功状态不会继续生效，需要维护者重新手动触发。
+
 ### Docker CI 镜像
 
 CI 镜像定义在 `ci/Dockerfile`，默认基于 CANN 8.5.0 910B Ubuntu 22.04 镜像构建，并预装工程基础依赖、`triton` 和 `triton-ascend`：
@@ -129,6 +131,27 @@ bash ci/run_ci_container.sh
 | `CI_BUILD_TORCH_CUSTOM` | `false` | 为 `true` 时额外编译 `torch_custom/fla_npu` |
 | `CI_RUN_TORCH_TESTS` | `false` | 为 `true` 时额外执行 `torch_custom/fla_npu/test/test.sh` |
 | `CI_RUN_EXAMPLE_ST` | `false` | 为 `true` 时额外执行 `examples/flash_gated_delta_rule.py` |
+
+### 触发 NPU CI
+
+NPU CI 支持两种手动触发方式。
+
+方式一：在 GitHub `Actions` 页面点击 `NPU CI`，再点击 `Run workflow`，填写：
+
+- `pr_number`: 需要验证的 PR 编号
+- `ci_mode`: `quick` 或 `full`
+- `ops`: 可选，逗号分隔的算子列表
+
+方式二：在 PR 评论区发送命令。只有维护账号可以触发：
+
+```text
+/run-npu-ci
+/run-npu-ci quick
+/run-npu-ci full
+/run-npu-ci quick ops=causal_conv1d,chunk_bwd_dv_local
+```
+
+如果当前 PR head commit 已经有成功的 `NPU CI / manual` 状态，重复点击按钮或重复评论不会再次启动 NPU CI。
 
 ### 注册 self-hosted runner
 

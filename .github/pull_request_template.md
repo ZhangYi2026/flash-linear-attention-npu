@@ -1,5 +1,16 @@
 # Pull Request 模板
 
+## 合入门禁提醒
+
+> **NPU CI 不会在 PR 新建、重开或 push 新 commit 时自动执行。**
+>
+> 合入前，当前 head commit 必须具备成功的 `NPU CI / manual` 状态；如果本 PR 后续更新了 commit，旧 commit 的 CI 结果不再有效，需要维护者重新触发。即使已有 2 个维护账号检视通过，只要当前 commit 未完成 NPU CI，仍不可合入（`weinachuan` 可按仓库保护规则 bypass）。
+>
+> 触发方式：
+>
+> - GitHub `Actions` 页面选择 `NPU CI`，点击 `Run workflow`，填写本 PR 编号。
+> - 在 PR 评论区发送 `/run-npu-ci quick` 或 `/run-npu-ci full`。
+
 ## 关联 Issue / 背景
 
 - 关联 Issue:

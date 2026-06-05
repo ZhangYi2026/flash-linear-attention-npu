@@ -22,7 +22,8 @@ curl -fsSL \
   "required_status_checks": {
     "strict": true,
     "contexts": [
-      "Repository Rules / required-reviewers"
+      "Repository Rules / required-reviewers",
+      "NPU CI / manual"
     ]
   },
   "enforce_admins": false,
