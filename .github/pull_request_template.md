@@ -22,7 +22,7 @@
 
 - 涉及算子名称:
 - 涉及目录 / 文件:
-- 责任人 / 提交人:
+- 责任人 / 提交人: <!-- pr-author -->
 - 修改范围:
   - [ ] `op_host` / 算子定义
   - [ ] `InferShape` / 参数校验
@@ -40,7 +40,8 @@
   - [ ] 否
   - [ ] 是，请说明影响面、兼容策略和回归范围:
 
-## 版本与产品编译矩阵
+<details>
+<summary>版本与产品编译矩阵</summary>
 
 本 PR 必须保证配套版本满足以下编译要求。当前工程中产品与 `--soc` 参数的对应关系如下:
 
@@ -50,7 +51,10 @@
 | A3 | `ascend910_93` |
 | A5 | `ascend950` |
 
-## 验证方法
+</details>
+
+<details>
+<summary>验证方法</summary>
 
 请按本节方法执行验证，并把实际命令、结果和日志填写到后续矩阵中。`<op_name>` 替换为本 PR 修改的算子名；多个算子用逗号分隔，或逐个填写。
 
@@ -97,20 +101,6 @@ bash build.sh --pkg --soc=ascend950 --ops=<op_name> --vendor_name=fla_npu
 
 根据本 PR 修改范围选择对应测试入口；涉及多个入口时均需执行。
 
-工程 UT:
-
-```sh
-bash build.sh -u --ops=<op_name> --soc=<soc>
-```
-
-按模块精确验证:
-
-```sh
-bash build.sh --ophost_test --ops=<op_name> --soc=<soc>
-bash build.sh --opapi_test --ops=<op_name> --soc=<soc>
-bash build.sh --opkernel_test --ops=<op_name> --soc=<soc>
-```
-
 `torch_custom` 适配验证:
 
 ```sh
@@ -147,17 +137,18 @@ bash build_and_test.sh
 python examples/flash_gated_delta_rule.py
 ```
 
-如本 PR 修改了 aclnn example 或新增了算子 example，同时执行:
-
-```sh
-bash build.sh --run_example <op_name> eager cust --vendor_name=fla_npu --soc=<soc>
-```
-
 通过标准:
 
 - 命令退出码为 0
 - 端到端结果与 golden / PyTorch 参考实现一致
 - 日志无精度异常、运行时异常、fallback 异常或 device error
+
+</details>
+
+<details>
+<summary>修改算子测试</summary>
+
+本 PR 修改到的算子必须完成对应 test 测试，并在 A2 / A3 / A5 覆盖验证结果。请填写实际执行命令，避免填写当前工程不支持的占位命令。
 
 ### CANN 8.5 及以上
 
@@ -180,22 +171,23 @@ bash build.sh --run_example <op_name> eager cust --vendor_name=fla_npu --soc=<so
 
 如结果为“未通过”或“未执行”，请在日志列填写原因、当前阻塞点、责任人和预计补齐时间。
 
-## 修改算子测试
-
-本 PR 修改到的算子必须完成对应 test 测试，并在 A2 / A3 / A5 覆盖验证结果。
+### 单算子测试结果
 
 | 产品 | `--soc` | 实际执行命令 | 结果 | 日志 / 精度结论 |
 | --- | --- | --- | --- | --- |
-| A2 | `ascend910b` | `bash build.sh -u --ops=<op_name> --soc=ascend910b` | 通过 / 未通过 / 未执行 |  |
-| A3 | `ascend910_93` | `bash build.sh -u --ops=<op_name> --soc=ascend910_93` | 通过 / 未通过 / 未执行 |  |
-| A5 | `ascend950` | `bash build.sh -u --ops=<op_name> --soc=ascend950` | 通过 / 未通过 / 未执行 |  |
+| A2 | `ascend910b` |  | 通过 / 未通过 / 未执行 |  |
+| A3 | `ascend910_93` |  | 通过 / 未通过 / 未执行 |  |
+| A5 | `ascend950` |  | 通过 / 未通过 / 未执行 |  |
 
 - 精度对比:
 - 性能对比:
 - 边界 / 异常场景:
 - 未覆盖风险:
 
-## 整体 Example ST 验证
+</details>
+
+<details>
+<summary>整体 Example ST 验证</summary>
 
 整体 example 的 ST 测试必须在 A2 / A3 / A5 通过。
 
@@ -208,6 +200,8 @@ bash build.sh --run_example <op_name> eager cust --vendor_name=fla_npu --soc=<so
 - 端到端场景说明:
 - 与本 PR 修改算子的关联:
 - 未覆盖原因及补充计划:
+
+</details>
 
 ## 兼容性、风险与回退
 

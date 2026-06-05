@@ -76,15 +76,71 @@ torch.ops.npu.npu_chunk_bwd_dv_local(...)
 
 ### 接入实践
 
-环境准备：[triton-ascend](https://gitcode.com/Ascend/triton-ascend)包安装，可以使用以下命令安装
+环境准备：除本仓根目录 `requirements.txt` 外，Triton 算子路径还依赖 `triton`、[triton-ascend](https://gitcode.com/Ascend/triton-ascend) 和 `pybind11`。可以使用以下命令安装：
+
 ```sh
+pip install -r requirements.txt
+pip install triton
 pip install triton-ascend
+pip install pybind11
 ```
 
 一键运行GDN模块，组装了所有GDN相关算子，包括前向和反向，包括AscendC和Triton算子
 ```sh
 python examples/flash_gated_delta_rule.py
 ```
+
+## CI 环境
+
+本仓提供基于 GitHub self-hosted runner 的 NPU CI 配置，当前规划部署在 `192.168.9.221` 的 `/workspace` 目录下，后续迁移时只需要迁移 runner 与 Docker 镜像/脚本。
+
+### Docker CI 镜像
+
+CI 镜像定义在 `ci/Dockerfile`，默认基于 CANN 8.5.0 910B Ubuntu 22.04 镜像构建，并预装工程基础依赖、`triton` 和 `triton-ascend`：
+
+```sh
+docker build -t fla-npu-ci:8.5.0-910b -f ci/Dockerfile .
+```
+
+如果需要额外安装 `tests/requirements.txt` 中的重型测试依赖，可以启用构建参数：
+
+```sh
+docker build --build-arg INSTALL_TEST_REQUIREMENTS=true -t fla-npu-ci:8.5.0-910b -f ci/Dockerfile .
+```
+
+### NPU 自动探测
+
+`ci/detect_npu.sh` 会扫描宿主机 `npu-smi info`，优先选择健康且空闲的 NPU；如果没有完全空闲的健康卡，会退化选择空闲卡，并在日志中打印所选卡的健康状态、空闲状态和推断出的 `--soc`。
+
+```sh
+bash ci/detect_npu.sh --summary
+bash ci/run_ci_container.sh
+```
+
+常用可配置环境变量如下：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `CI_IMAGE` | `fla-npu-ci:8.5.0-910b` | CI Docker 镜像名 |
+| `CI_MODE` | `quick` | `quick` 执行当前 SOC 编译；`full` 调用 `gdn-verify.sh` |
+| `CI_OPS` | 空 | 指定逗号分隔的算子列表；为空时按脚本默认范围执行 |
+| `CI_REBUILD_IMAGE` | `false` | 为 `true` 时运行前重新构建镜像 |
+| `CI_REQUIRE_HEALTHY_NPU` | `false` | 为 `true` 时所选 NPU 非 `OK` 会直接失败 |
+| `CI_BUILD_TORCH_CUSTOM` | `false` | 为 `true` 时额外编译 `torch_custom/fla_npu` |
+| `CI_RUN_TORCH_TESTS` | `false` | 为 `true` 时额外执行 `torch_custom/fla_npu/test/test.sh` |
+| `CI_RUN_EXAMPLE_ST` | `false` | 为 `true` 时额外执行 `examples/flash_gated_delta_rule.py` |
+
+### 注册 self-hosted runner
+
+仓库管理员需要先在 GitHub 仓库设置里生成 self-hosted runner 注册 token，然后在目标服务器执行：
+
+```sh
+bash ci/setup_self_hosted_runner.sh \
+  --url https://github.com/flashserve/flash-linear-attention-npu \
+  --token <registration-token>
+```
+
+runner 默认标签为 `linux,arm64,npu,flash-linear-attention-npu`，与 `.github/workflows/ci.yml` 中的 `runs-on` 保持一致。
 
 ## 🔍目录结构
 关键目录如下：

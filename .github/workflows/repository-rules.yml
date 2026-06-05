@@ -1,0 +1,140 @@
+name: Repository Rules
+
+on:
+  create:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+jobs:
+  branch-creation-guard:
+    name: branch-creation-guard
+    if: github.event_name == 'create' && github.event.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Delete unauthorized repository branch
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const allowed = new Set([
+              'juyangokok',
+              'weinachuan',
+              'weiwei-612',
+              'woey',
+              'zhangshuolei-hfut',
+              'chen-linxin',
+            ]);
+            const actor = context.actor;
+            const branch = context.payload.ref;
+            if (allowed.has(actor)) {
+              core.notice(`${actor} is allowed to create repository branches.`);
+              return;
+            }
+
+            await github.rest.git.deleteRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `heads/${branch}`,
+            });
+            core.setFailed(
+              `${actor} is not allowed to create repository branch "${branch}". ` +
+              'Please fork the repository and open a pull request from your fork.'
+            );
+
+  pull-request-author:
+    name: pull-request-author
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Fill PR author
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const body = pr.body || '';
+            const authorLine = `- 责任人 / 提交人: @${pr.user.login}`;
+            const marker = /- 责任人 \/ 提交人:[^\n]*/;
+            if (!marker.test(body)) {
+              core.notice('PR body does not contain the author marker.');
+              return;
+            }
+            const nextBody = body.replace(marker, authorLine);
+            if (nextBody === body) {
+              core.notice('PR author is already filled.');
+              return;
+            }
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              body: nextBody,
+            });
+
+  required-reviewers:
+    name: required-reviewers
+    if: github.event_name == 'pull_request_target' || github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Require two approvals from maintainers
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.notice('No pull request payload found.');
+              return;
+            }
+            if (pr.draft) {
+              core.notice('Draft PR: review gate is skipped until the PR is ready for review.');
+              return;
+            }
+
+            const maintainers = new Set([
+              'juyangokok',
+              'weinachuan',
+              'weiwei-612',
+              'woey',
+              'zhangshuolei-hfut',
+              'chen-linxin',
+            ]);
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+
+            const approvals = new Map();
+            for (const review of reviews) {
+              const login = review.user && review.user.login;
+              if (!login || !maintainers.has(login) || login === pr.user.login) {
+                continue;
+              }
+              if (review.state === 'APPROVED' && review.commit_id === pr.head.sha) {
+                approvals.set(login, review);
+              } else if (review.state === 'CHANGES_REQUESTED' || review.state === 'DISMISSED') {
+                approvals.delete(login);
+              }
+            }
+
+            const approvedBy = [...approvals.keys()].sort();
+            await core.summary
+              .addHeading('Repository review gate')
+              .addRaw(`Required approvals: 2\n\n`)
+              .addRaw(`Current head SHA: ${pr.head.sha}\n\n`)
+              .addRaw(`Approved by: ${approvedBy.length ? approvedBy.map((u) => `@${u}`).join(', ') : 'none'}\n`)
+              .write();
+
+            if (approvedBy.length < 2) {
+              core.setFailed(
+                `Need at least 2 approvals from maintainers. ` +
+                `Current valid approvals on this head commit: ${approvedBy.length}.`
+              );
+            }

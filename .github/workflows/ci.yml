@@ -1,0 +1,35 @@
+name: NPU CI
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ci_mode:
+        description: "CI mode: quick or full"
+        required: false
+        default: quick
+      ops:
+        description: "Optional comma-separated operator list"
+        required: false
+        default: ''
+
+jobs:
+  ascend-npu:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: [self-hosted, linux, arm64, npu, flash-linear-attention-npu]
+    timeout-minutes: 240
+    env:
+      CI_MODE: ${{ inputs.ci_mode || 'quick' }}
+      CI_OPS: ${{ inputs.ops || '' }}
+      CI_IMAGE: fla-npu-ci:8.5.0-910b
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run NPU CI container
+        run: bash ci/run_ci_container.sh
