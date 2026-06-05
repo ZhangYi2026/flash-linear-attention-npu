@@ -76,13 +76,21 @@ torch.ops.npu.npu_chunk_bwd_dv_local(...)
 
 ### 接入实践
 
-环境准备：除本仓根目录 `requirements.txt` 外，Triton 算子路径还依赖 `triton`、[triton-ascend](https://gitcode.com/Ascend/triton-ascend) 和 `pybind11`。可以使用以下命令安装：
+环境准备：除本仓根目录 `requirements.txt` 外，Example ST 还依赖 Ascend PyTorch `v26.1.0-beta.1` release family 对应的 PyTorch / torch-npu / torchnpugen、[triton-ascend](https://gitcode.com/Ascend/triton-ascend) 和 `pybind11`。`v26.1.0-beta.1` 是必须的 Ascend PyTorch release 版本；PyTorch 小版本可以按环境选择，但必须安装同一 release family 下匹配的 `torch_npu` wheel。对应 wheel 已包含 `torchnpugen`，并修复了 GDN 算子自定义适配中 `aclnn_extension` 未传 stream 导致算子间数据同步不生效的问题；不要再拉取 `op-plugin` 仓库重新编译。`triton-ascend` 会提供 `triton` Python 模块；3.2.0 及以前不要和社区版 `triton` 共存，否则可能触发 `torch_npu` 的 `triton` namespace 重复注册。
 
 ```sh
+# 以下示例使用 Python 3.10/aarch64 + PyTorch 2.7.1；其他 PyTorch 小版本请切换到同属 v26.1.0-beta.1 的配套 tag 和 wheel。
 pip install -r requirements.txt
-pip install triton
-pip install triton-ascend
+pip install torch==2.7.1
+curl -fL --retry 3 --retry-delay 2 -o /tmp/torch_npu-2.7.1.post5-cp310-cp310-manylinux_2_28_aarch64.whl \
+  https://gitcode.com/Ascend/pytorch/releases/download/v26.1.0-beta.1-pytorch2.7.1/torch_npu-2.7.1.post5-cp310-cp310-manylinux_2_28_aarch64.whl
+pip install /tmp/torch_npu-2.7.1.post5-cp310-cp310-manylinux_2_28_aarch64.whl
+pip uninstall -y triton
+pip install triton-ascend==3.2.0
+pip uninstall -y triton
 pip install pybind11
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+export PYTORCH_VERSION=2.7.1
 ```
 
 一键运行GDN模块，组装了所有GDN相关算子，包括前向和反向，包括AscendC和Triton算子
@@ -98,7 +106,7 @@ python examples/flash_gated_delta_rule.py
 
 ### Docker CI 镜像
 
-CI 镜像定义在 `ci/Dockerfile`，默认基于 CANN 8.5.0 910B Ubuntu 22.04 镜像构建，并预装工程基础依赖、`triton` 和 `triton-ascend`：
+CI 镜像定义在 `ci/Dockerfile`，默认基于 CANN 8.5.0 910B Ubuntu 22.04 镜像构建，并预装工程基础依赖、Ascend PyTorch `v26.1.0-beta.1` release family 下 `pytorch2.7.1` 配套的 `torch==2.7.1` 与 `torch_npu-2.7.1.post5-cp310-cp310-manylinux_2_28_aarch64.whl`（包含 `torchnpugen`）、`triton-ascend==3.2.0` 和 `pybind11`：
 
 ```sh
 docker build -t fla-npu-ci:8.5.0-910b -f ci/Dockerfile .
@@ -109,6 +117,8 @@ docker build -t fla-npu-ci:8.5.0-910b -f ci/Dockerfile .
 ```sh
 docker build --build-arg INSTALL_TEST_REQUIREMENTS=true -t fla-npu-ci:8.5.0-910b -f ci/Dockerfile .
 ```
+
+如需调整 PyTorch / torch-npu 版本，可通过 `TORCH_VERSION`、`TORCH_NPU_VERSION`、`TORCH_NPU_RELEASE_TAG`、`TORCH_NPU_WHL`、`TORCH_NPU_WHL_URL` 构建参数覆盖；`TORCH_NPU_RELEASE_TAG` 必须属于 `ASCEND_PYTORCH_RELEASE_VERSION=v26.1.0-beta.1`，并且 wheel 必须与所选 PyTorch 和 Python 版本匹配。
 
 ### NPU 自动探测
 
@@ -127,10 +137,14 @@ bash ci/run_ci_container.sh
 | `CI_MODE` | `quick` | `quick` 执行当前 SOC 编译；`full` 调用 `gdn-verify.sh` |
 | `CI_OPS` | 空 | 指定逗号分隔的算子列表；为空时按脚本默认范围执行 |
 | `CI_REBUILD_IMAGE` | `false` | 为 `true` 时运行前重新构建镜像 |
+| `CI_DOCKER_PRIVILEGED` | `true` | 运行 CI 容器时启用 `--privileged`，否则 `torch_npu` 可能无法枚举 NPU |
+| `CI_CONTAINER_DEVICE` | `0` | 容器内传给 `torch.npu.set_device` / example 的逻辑设备号；宿主机物理卡由 `ASCEND_RT_VISIBLE_DEVICES` 限定后通常映射为 `0` |
 | `CI_REQUIRE_HEALTHY_NPU` | `false` | 为 `true` 时所选 NPU 非 `OK` 会直接失败 |
 | `CI_BUILD_TORCH_CUSTOM` | `false` | 为 `true` 时额外编译 `torch_custom/fla_npu` |
 | `CI_RUN_TORCH_TESTS` | `false` | 为 `true` 时额外执行 `torch_custom/fla_npu/test/test.sh` |
-| `CI_RUN_EXAMPLE_ST` | `false` | 为 `true` 时额外执行 `examples/flash_gated_delta_rule.py` |
+| `CI_RUN_EXAMPLE_ST` | `true` | 官方 CI 固定执行；安装 `.run` 包、编译 `torch_custom/fla_npu` 并执行 `examples/flash_gated_delta_rule.py` |
+| `CI_EXAMPLE_ARGS` | 空 | 可选，传给 `examples/flash_gated_delta_rule.py` 的额外参数；为空时保持用例原始 shape，仅由 CI 覆盖容器内逻辑设备号 `--device` |
+| `CI_EXAMPLE_CASES` | 空 | 可选，分号分隔的多组 Example ST 参数，用于后续泛化场景；设置后优先于 `CI_EXAMPLE_ARGS` |
 | `CI_CACHE_ROOT` | `/workspace/flash-linear-attention-npu-ci/cache` | self-hosted runner 上的持久 CI 缓存根目录 |
 | `CI_THIRD_PARTY_CACHE` | `$CI_CACHE_ROOT/third_party` | 挂载到容器 `/workspace/repo/third_party` 的三方依赖缓存目录 |
 | `CI_CPACK_JOBS` | `$CI_JOBS` | 传给 `CMAKE_BUILD_PARALLEL_LEVEL`/`MAKEFLAGS`，用于加速 cpack 内部 preinstall 构建 |
@@ -148,6 +162,7 @@ NPU CI 支持两种手动触发方式。
 - `pr_number`: 需要验证的 PR 编号
 - `ci_mode`: `quick` 或 `full`
 - `ops`: 可选，逗号分隔的算子列表
+- `example_args`: 可选，传给 `examples/flash_gated_delta_rule.py` 的参数；不填时保持用例原始 shape，仅由 CI 覆盖容器内逻辑设备号 `--device`
 
 方式二：在 PR 评论区发送命令。只有维护账号可以触发：
 
@@ -158,9 +173,13 @@ NPU CI 支持两种手动触发方式。
 /run-npu-ci quick ops=causal_conv1d,chunk_bwd_dv_local
 ```
 
+无论通过按钮还是评论触发，NPU CI 都会执行 `examples/flash_gated_delta_rule.py`，默认保持该用例原始 shape。后续增加已批准的泛化场景时，可在 self-hosted runner 环境中通过 `CI_EXAMPLE_CASES` 扩展多组 Example ST。
+
 如果当前 PR head commit 已经有成功的 `NPU CI / manual` 状态，重复点击按钮或重复评论不会再次启动 NPU CI。
 
 ### 注册 self-hosted runner
+
+完整部署教程见 [`docs/npu-ci-deployment-guide.md`](docs/npu-ci-deployment-guide.md)。
 
 仓库管理员需要先在 GitHub 仓库设置里生成 self-hosted runner 注册 token，然后在目标服务器执行：
 

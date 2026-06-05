@@ -2,13 +2,23 @@ FROM swr.cn-south-1.myhuaweicloud.com/ascendhub/cann:8.5.0-910b-ubuntu22.04-py3.
 
 ARG INSTALL_TEST_REQUIREMENTS=false
 ARG PREWARM_THIRD_PARTY=true
+ARG INSTALL_TORCH_NPU=true
+ARG ASCEND_PYTORCH_RELEASE_VERSION=v26.1.0-beta.1
+ARG TORCH_VERSION=2.7.1
+ARG TORCH_NPU_VERSION=2.7.1.post5
+ARG TORCH_NPU_RELEASE_TAG=v26.1.0-beta.1-pytorch2.7.1
+ARG TORCH_NPU_WHL=torch_npu-2.7.1.post5-cp310-cp310-manylinux_2_28_aarch64.whl
+ARG TORCH_NPU_WHL_URL=
+ARG TRITON_ASCEND_VERSION=3.2.0
 
 ENV DEBIAN_FRONTEND=noninteractive \
     ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest \
     ASCEND_TOOLKIT_HOME=/usr/local/Ascend/ascend-toolkit/latest \
     LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/lib64:/usr/local/Ascend/driver/lib64:/usr/local/Ascend/driver/lib64/driver \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTORCH_VERSION=${TORCH_VERSION} \
+    TORCH_DEVICE_BACKEND_AUTOLOAD=0
 
 SHELL ["/bin/bash", "-lc"]
 
@@ -37,13 +47,31 @@ RUN apt-get update && \
 COPY requirements.txt /tmp/fla-ci/requirements.txt
 COPY tests/requirements.txt /tmp/fla-ci/tests-requirements.txt
 
-RUN python3 -m pip install --upgrade pip setuptools wheel && \
-    python3 -m pip install -r /tmp/fla-ci/requirements.txt && \
-    python3 -m pip install triton triton-ascend && \
-    python3 -m pip install --target=/tmp/pybind11-target pybind11 && \
-    cp -a /tmp/pybind11-target/. /usr/local/lib/python3.10/dist-packages/ && \
-    rm -rf /tmp/pybind11-target && \
-    python3 -c "import pybind11; print(pybind11.__file__)" && \
+RUN set -e; \
+    python3 -m pip install --upgrade pip setuptools wheel; \
+    python3 -m pip install -r /tmp/fla-ci/requirements.txt; \
+    if [[ "${INSTALL_TORCH_NPU}" == "true" ]]; then \
+      case "${TORCH_NPU_RELEASE_TAG}" in \
+        "${ASCEND_PYTORCH_RELEASE_VERSION}"-pytorch*) ;; \
+        *) echo "TORCH_NPU_RELEASE_TAG must belong to ${ASCEND_PYTORCH_RELEASE_VERSION}: ${TORCH_NPU_RELEASE_TAG}" >&2; exit 2 ;; \
+      esac; \
+      python3 -m pip install "torch==${TORCH_VERSION}"; \
+      torch_npu_url="${TORCH_NPU_WHL_URL:-https://gitcode.com/Ascend/pytorch/releases/download/${TORCH_NPU_RELEASE_TAG}/${TORCH_NPU_WHL}}"; \
+      curl -fL --retry 3 --retry-delay 2 \
+        -o "/tmp/${TORCH_NPU_WHL}" \
+        "${torch_npu_url}"; \
+      python3 -m pip install "/tmp/${TORCH_NPU_WHL}"; \
+      rm -f "/tmp/${TORCH_NPU_WHL}"; \
+      python3 -c 'from importlib import metadata; assert metadata.version("torch-npu") == "'"${TORCH_NPU_VERSION}"'"; print("torch-npu", metadata.version("torch-npu"))'; \
+      python3 -c 'import importlib; [importlib.import_module(name) for name in ("torchnpugen.gen_op_plugin_functions", "torchnpugen.gen_backend_stubs", "torchnpugen.struct.gen_struct_opapi")]; print("torchnpugen OK")'; \
+    fi; \
+    python3 -m pip uninstall -y triton || true; \
+    python3 -m pip install "triton-ascend==${TRITON_ASCEND_VERSION}"; \
+    python3 -m pip uninstall -y triton || true; \
+    python3 -m pip install --target=/tmp/pybind11-target pybind11; \
+    cp -a /tmp/pybind11-target/. /usr/local/lib/python3.10/dist-packages/; \
+    rm -rf /tmp/pybind11-target; \
+    python3 -c "import pybind11; print(pybind11.__file__)"; \
     if [[ "${INSTALL_TEST_REQUIREMENTS}" == "true" ]]; then \
       grep -v -E '^[[:space:]]*(#|$|valgrind[[:space:]]*$)' /tmp/fla-ci/tests-requirements.txt \
         | python3 -m pip install -r /dev/stdin; \

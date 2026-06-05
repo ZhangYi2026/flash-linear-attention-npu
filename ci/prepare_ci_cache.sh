@@ -34,6 +34,7 @@ hash_file_list() {
         requirements.txt
         tests/requirements.txt
         torch_extension
+        torch_custom
     )
 
     {

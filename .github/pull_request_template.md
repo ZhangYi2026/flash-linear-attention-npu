@@ -10,6 +10,9 @@
 >
 > - GitHub `Actions` 页面选择 `NPU CI`，点击 `Run workflow`，填写本 PR 编号。
 > - 在 PR 评论区发送 `/run-npu-ci quick` 或 `/run-npu-ci full`。
+> - NPU CI 会固定执行 `examples/flash_gated_delta_rule.py`，默认保持该用例原始 shape；通常不要填写 `example_args`，除非维护者明确要求追加已批准的泛化场景参数。
+> - Example ST 必须使用 Ascend PyTorch `v26.1.0-beta.1` release family 的配套 `torch_npu` wheel（已包含 `torchnpugen` 并修复 GDN stream 同步问题）；PyTorch 小版本可按环境选择，但不要拉取 `op-plugin` 重新编译或安装不属于该 release family 的旧版 `torch-npu`。
+> - NPU CI 部署与排障教程见 [`docs/npu-ci-deployment-guide.md`](docs/npu-ci-deployment-guide.md)。
 
 ## 关联 Issue / 背景
 
@@ -147,6 +150,8 @@ bash build_and_test.sh
 ```sh
 python examples/flash_gated_delta_rule.py
 ```
+
+也可以由维护者触发 CI 验证：`/run-npu-ci quick`。CI 固定执行 `examples/flash_gated_delta_rule.py`，默认保持该用例原始 shape，仅覆盖容器内逻辑设备号 `--device`。
 
 通过标准:
 

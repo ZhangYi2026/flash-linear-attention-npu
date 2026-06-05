@@ -16,6 +16,10 @@ on:
         description: "Optional comma-separated operator list"
         required: false
         default: ''
+      example_args:
+        description: "Optional extra args for examples/flash_gated_delta_rule.py; empty keeps original shape"
+        required: false
+        default: ''
 
 jobs:
   prepare:
@@ -40,6 +44,7 @@ jobs:
       head_sha: ${{ steps.prepare.outputs.head_sha }}
       ci_mode: ${{ steps.prepare.outputs.ci_mode }}
       ops: ${{ steps.prepare.outputs.ops }}
+      example_args: ${{ steps.prepare.outputs.example_args }}
     steps:
       - name: Resolve PR and requested CI mode
         id: prepare
@@ -64,11 +69,13 @@ jobs:
             let prNumber;
             let ciMode = 'quick';
             let ops = '';
+            let exampleArgs = '';
 
             if (context.eventName === 'workflow_dispatch') {
               prNumber = Number(core.getInput('pr_number', { required: true }));
               ciMode = core.getInput('ci_mode') || 'quick';
               ops = core.getInput('ops') || '';
+              exampleArgs = core.getInput('example_args') || '';
             } else {
               prNumber = context.payload.issue.number;
               const body = (context.payload.comment.body || '').trim();
@@ -78,6 +85,8 @@ jobs:
                   ciMode = part;
                 } else if (part.startsWith('ops=')) {
                   ops = part.slice('ops='.length);
+                } else if (part.startsWith('example_args=')) {
+                  exampleArgs = part.slice('example_args='.length);
                 }
               }
             }
@@ -88,6 +97,10 @@ jobs:
             }
             if (!['quick', 'full'].includes(ciMode)) {
               core.setFailed(`Unsupported CI mode: ${ciMode}`);
+              return;
+            }
+            if (/[\r\n]/.test(exampleArgs)) {
+              core.setFailed('example_args must be a single line.');
               return;
             }
 
@@ -108,7 +121,10 @@ jobs:
               per_page: 100,
             });
             const latestManualCi = statuses.find((status) => status.context === contextName);
-            if (latestManualCi && latestManualCi.state === 'success') {
+            const latestPassedWithExample = latestManualCi &&
+              latestManualCi.state === 'success' &&
+              (latestManualCi.description || '').includes('+example');
+            if (latestPassedWithExample) {
               core.notice(`NPU CI already passed for ${pr.head.sha}; skipping duplicate run.`);
               if (context.eventName === 'issue_comment') {
                 await github.rest.issues.createComment({
@@ -124,6 +140,7 @@ jobs:
               core.setOutput('head_sha', pr.head.sha);
               core.setOutput('ci_mode', ciMode);
               core.setOutput('ops', ops);
+              core.setOutput('example_args', exampleArgs);
               return;
             }
 
@@ -134,7 +151,7 @@ jobs:
               sha: pr.head.sha,
               state: 'pending',
               context: contextName,
-              description: `NPU CI requested by @${actor} (${ciMode})`,
+              description: `NPU CI requested by @${actor} (${ciMode}+example)`,
               target_url: targetUrl,
             });
             if (context.eventName === 'issue_comment') {
@@ -142,7 +159,7 @@ jobs:
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: prNumber,
-                body: `NPU CI started for \`${pr.head.sha}\` in \`${ciMode}\` mode${ops ? ` with ops=\`${ops}\`` : ''}.`,
+                body: `NPU CI started for \`${pr.head.sha}\` in \`${ciMode}\` mode${ops ? ` with ops=\`${ops}\`` : ''} with mandatory Example ST.`,
               });
             }
 
@@ -152,6 +169,7 @@ jobs:
             core.setOutput('head_sha', pr.head.sha);
             core.setOutput('ci_mode', ciMode);
             core.setOutput('ops', ops);
+            core.setOutput('example_args', exampleArgs);
 
   ascend-npu:
     name: ascend-npu
@@ -165,6 +183,8 @@ jobs:
     env:
       CI_MODE: ${{ needs.prepare.outputs.ci_mode }}
       CI_OPS: ${{ needs.prepare.outputs.ops }}
+      CI_RUN_EXAMPLE_ST: 'true'
+      CI_EXAMPLE_ARGS: ${{ needs.prepare.outputs.example_args }}
       CI_IMAGE: fla-npu-ci:8.5.0-910b
     steps:
       - name: Checkout PR code
@@ -205,6 +225,6 @@ jobs:
               sha: '${{ needs.prepare.outputs.head_sha }}',
               state,
               context: 'NPU CI / manual',
-              description: state === 'success' ? `NPU CI passed (${mode})` : `NPU CI failed (${mode})`,
+              description: state === 'success' ? `NPU CI passed (${mode}+example)` : `NPU CI failed (${mode}+example)`,
               target_url: targetUrl,
             });

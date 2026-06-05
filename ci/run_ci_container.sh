@@ -39,6 +39,9 @@ for dev in /dev/davinci[0-9]* /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc;
         device_args+=(--device "$dev")
     fi
 done
+if [[ "${CI_DOCKER_PRIVILEGED:-true}" == "true" ]]; then
+    device_args=(--privileged "${device_args[@]}")
+fi
 
 third_party_cache="${CI_THIRD_PARTY_CACHE:-$cache_root/third_party}"
 mkdir -p "$third_party_cache"
@@ -74,6 +77,7 @@ docker run --rm \
     -e NPU_SELECTED_HEALTH="${NPU_SELECTED_HEALTH}" \
     -e NPU_SELECTED_FREE="${NPU_SELECTED_FREE}" \
     -e NPU_SOC="${NPU_SOC}" \
+    -e CI_CONTAINER_DEVICE="${CI_CONTAINER_DEVICE:-0}" \
     -e CI_MODE="${CI_MODE:-quick}" \
     -e CI_SOC="${CI_SOC:-${NPU_SOC}}" \
     -e CI_OPS="${CI_OPS:-}" \
@@ -83,7 +87,9 @@ docker run --rm \
     -e CI_SEED_THIRD_PARTY="${CI_SEED_THIRD_PARTY:-true}" \
     -e CI_BUILD_TORCH_CUSTOM="${CI_BUILD_TORCH_CUSTOM:-false}" \
     -e CI_RUN_TORCH_TESTS="${CI_RUN_TORCH_TESTS:-false}" \
-    -e CI_RUN_EXAMPLE_ST="${CI_RUN_EXAMPLE_ST:-false}" \
+    -e CI_RUN_EXAMPLE_ST="${CI_RUN_EXAMPLE_ST:-true}" \
+    -e CI_EXAMPLE_ARGS="${CI_EXAMPLE_ARGS:-}" \
+    -e CI_EXAMPLE_CASES="${CI_EXAMPLE_CASES:-}" \
     -e CI_TEST_OP="${CI_TEST_OP:-}" \
     "$image" \
     bash ci/run_checks.sh
