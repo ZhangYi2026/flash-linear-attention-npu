@@ -1,0 +1,114 @@
+name: NPU CI 默认状态
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+jobs:
+  mark-not-run:
+    name: 标记 NPU CI 未执行
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+      statuses: write
+    steps:
+      - name: 写入未执行状态并提示触发人
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.NPU_CI_BOT_TOKEN || github.token }}
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.notice('没有找到 Pull Request 事件信息。');
+              return;
+            }
+
+            const contextName = 'NPU CI / 手动验证';
+            const maintainers = [
+              'juyangokok',
+              'weinachuan',
+              'weiwei-612',
+              'woey',
+              'zhangshuolei-hfut',
+              'chen-linxin',
+            ];
+            const marker = `<!-- npu-ci:pr=${pr.number}:sha=${pr.head.sha} -->`;
+            const maintainerText = maintainers.map((user) => `\`@${user}\``).join('、');
+
+            const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: pr.head.sha,
+              per_page: 100,
+            });
+            const manualCiStatuses = statuses
+              .filter((status) => status.context === contextName)
+              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            const latestExecutionCi = manualCiStatuses
+              .find((status) => (status.description || '').includes('+example'));
+            const latestNotRunCi = manualCiStatuses
+              .find((status) => (status.description || '').includes('未执行'));
+
+            if (latestExecutionCi) {
+              core.notice(`当前 head commit 已经有 NPU CI 执行状态：${latestExecutionCi.state}。`);
+              return;
+            }
+
+            if (!latestNotRunCi) {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: pr.head.sha,
+                state: 'pending',
+                context: contextName,
+                description: '未执行：请维护者评论 /run-npu-ci quick',
+                target_url: pr.html_url,
+              });
+            }
+
+            const body = [
+              marker,
+              `NPU CI 暂未执行：\`${pr.head.sha}\`。`,
+              '',
+              '- 当前状态：未执行',
+              '- 合入要求：当前 commit 必须通过 `NPU CI / 手动验证`',
+              '- 触发命令：维护者在本 PR 评论 `/run-npu-ci quick` 或 `/run-npu-ci full`',
+              `- 可请求触发的维护账号：${maintainerText}`,
+              '- Example ST：必跑',
+            ].join('\n');
+
+            try {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                per_page: 100,
+              });
+              const existing = comments
+                .filter((comment) =>
+                  comment.user &&
+                  comment.user.type === 'Bot' &&
+                  typeof comment.body === 'string' &&
+                  comment.body.includes(marker)
+                )
+                .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))[0];
+
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existing.id,
+                  body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: pr.number,
+                  body,
+                });
+              }
+            } catch (error) {
+              core.warning(`Unable to create or update PR comment: ${error.message}`);
+            }
