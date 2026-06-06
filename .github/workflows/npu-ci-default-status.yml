@@ -35,6 +35,13 @@ jobs:
             ];
             const marker = `<!-- npu-ci:pr=${pr.number}:sha=${pr.head.sha} -->`;
             const maintainerText = maintainers.map((user) => `\`@${user}\``).join('、');
+            const isCommitUpdate = context.payload.action === 'synchronize';
+            const pendingDescription = isCommitUpdate
+              ? '未执行：commit 已变化，请重新触发 /run-npu-ci quick'
+              : '未执行：请维护者评论 /run-npu-ci quick';
+            const title = isCommitUpdate
+              ? `PR commit 已变化，NPU CI 已重置为未执行：\`${pr.head.sha}\`。`
+              : `NPU CI 暂未执行：\`${pr.head.sha}\`。`;
 
             const statuses = await github.paginate(github.rest.repos.listCommitStatusesForRef, {
               owner: context.repo.owner,
@@ -62,21 +69,22 @@ jobs:
                 sha: pr.head.sha,
                 state: 'pending',
                 context: contextName,
-                description: '未执行：请维护者评论 /run-npu-ci quick',
+                description: pendingDescription,
                 target_url: pr.html_url,
               });
             }
 
             const body = [
               marker,
-              `NPU CI 暂未执行：\`${pr.head.sha}\`。`,
+              title,
               '',
               '- 当前状态：未执行',
+              isCommitUpdate ? '- 原因：PR head commit 已变化，旧 commit 的 NPU CI 结果不再生效' : '',
               '- 合入要求：当前 commit 必须通过 `NPU CI / 手动验证`',
               '- 触发命令：维护者在本 PR 评论 `/run-npu-ci quick` 或 `/run-npu-ci full`',
               `- 可请求触发的维护账号：${maintainerText}`,
               '- Example ST：必跑',
-            ].join('\n');
+            ].filter(Boolean).join('\n');
 
             try {
               const comments = await github.paginate(github.rest.issues.listComments, {
