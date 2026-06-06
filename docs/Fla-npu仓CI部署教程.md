@@ -40,7 +40,7 @@
 
 ## 你需要准备什么
 
-- 一台可 SSH 登录的 Ascend NPU 服务器，例如 `192.168.9.221`
+- 一台可 SSH 登录的 Ascend NPU 服务器，例如 `<npu-ci-host>`
 - 服务器是 Linux/aarch64，已安装 Ascend 驱动，宿主机能执行 `npu-smi info`
 - 服务器已安装 Docker，并且当前用户可以执行 `docker`
 - GitHub 仓库管理员权限
@@ -51,7 +51,7 @@
 ## 第 1 步：登录服务器并准备目录
 
 ```sh
-ssh 192.168.9.221
+ssh <npu-ci-host>
 ```
 
 创建 CI 工作目录：

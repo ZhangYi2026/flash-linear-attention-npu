@@ -70,6 +70,21 @@ jobs:
             let ciMode = 'quick';
             let ops = '';
             let exampleArgs = '';
+            const postComment = async (body) => {
+              if (context.eventName !== 'issue_comment') {
+                return;
+              }
+              try {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body,
+                });
+              } catch (error) {
+                core.warning(`Unable to create PR comment: ${error.message}`);
+              }
+            };
 
             if (context.eventName === 'workflow_dispatch') {
               prNumber = Number(core.getInput('pr_number', { required: true }));
@@ -126,14 +141,7 @@ jobs:
               (latestManualCi.description || '').includes('+example');
             if (latestPassedWithExample) {
               core.notice(`NPU CI already passed for ${pr.head.sha}; skipping duplicate run.`);
-              if (context.eventName === 'issue_comment') {
-                await github.rest.issues.createComment({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  issue_number: prNumber,
-                  body: `NPU CI already passed for \`${pr.head.sha}\`; no new run was started.`,
-                });
-              }
+              await postComment(`NPU CI already passed for \`${pr.head.sha}\`; no new run was started.`);
               core.setOutput('should_run', 'false');
               core.setOutput('pr_number', String(prNumber));
               core.setOutput('head_repo', pr.head.repo.full_name);
@@ -154,14 +162,7 @@ jobs:
               description: `NPU CI requested by @${actor} (${ciMode}+example)`,
               target_url: targetUrl,
             });
-            if (context.eventName === 'issue_comment') {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body: `NPU CI started for \`${pr.head.sha}\` in \`${ciMode}\` mode${ops ? ` with ops=\`${ops}\`` : ''} with mandatory Example ST.`,
-              });
-            }
+            await postComment(`NPU CI started for \`${pr.head.sha}\` in \`${ciMode}\` mode${ops ? ` with ops=\`${ops}\`` : ''} with mandatory Example ST.`);
 
             core.setOutput('should_run', 'true');
             core.setOutput('pr_number', String(prNumber));
