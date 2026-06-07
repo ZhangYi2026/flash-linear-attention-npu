@@ -76,22 +76,38 @@ jobs:
             });
 
   required-reviewers:
-    name: 维护者检视门禁
+    name: 维护者检视状态更新
     if: github.event_name == 'pull_request_target' || github.event_name == 'pull_request_review'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
+      statuses: write
     steps:
       - name: 检查维护者审批数量
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.NPU_CI_BOT_TOKEN || github.token }}
           script: |
             const pr = context.payload.pull_request;
             if (!pr) {
               core.notice('没有找到 Pull Request 事件信息。');
               return;
             }
+            const contextName = '仓库规则 / 维护者检视门禁';
+            const targetUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const setGateStatus = async (state, description) => {
+              await github.rest.repos.createCommitStatus({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha: pr.head.sha,
+                state,
+                context: contextName,
+                description,
+                target_url: targetUrl,
+              });
+            };
             if (pr.draft) {
+              await setGateStatus('pending', '等待 PR 标记为 ready for review');
               core.notice('草稿 PR 暂不检查检视门禁，标记为 ready for review 后再检查。');
               return;
             }
@@ -184,15 +200,21 @@ jobs:
               .addRaw(abiFindings.length ? `\nABI 风险文件：\n${abiFindings.map((item) => `- ${item}`).join('\n')}\n` : '')
               .write();
 
-            if (approvedBy.length < 2) {
-              core.setFailed(
-                `需要至少 2 个维护账号在当前 head commit 上检视通过。` +
-                `当前有效审批数：${approvedBy.length}。`
-              );
+            const missingRequiredReviews = approvedBy.length < 2;
+            const missingAbiOwner = needAbiOwnerApproval && !abiOwnerApproved;
+            if (missingRequiredReviews || missingAbiOwner) {
+              const reasons = [];
+              if (missingRequiredReviews) {
+                reasons.push(`维护者审批 ${approvedBy.length}/2`);
+              }
+              if (missingAbiOwner) {
+                reasons.push('等待 @weinachuan ABI 审批');
+              }
+              const description = reasons.join('；').slice(0, 140);
+              await setGateStatus('pending', description);
+              core.notice(description);
+              return;
             }
-            if (needAbiOwnerApproval && !abiOwnerApproved) {
-              core.setFailed(
-                `本 PR 修改了 def/aclnn/torch 接口等 ABI 风险区域，` +
-                `必须由 @weinachuan 在当前 head commit 上检视通过。`
-              );
-            }
+
+            await setGateStatus('success', '维护者审批门禁通过');
+            core.notice('维护者审批门禁通过。');
