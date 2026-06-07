@@ -635,6 +635,11 @@ class DemoGatedDeltaNet(nn.Module):
         self.hidden_size = hidden_size
         self.num_v_heads = num_value_heads
         self.num_k_heads = num_key_heads
+        if self.num_v_heads % self.num_k_heads != 0:
+            raise ValueError(
+                "num_value_heads must be an integer multiple of num_key_heads "
+                f"for the current grouped-value smoke path, got {self.num_v_heads} and {self.num_k_heads}."
+            )
         self.head_k_dim = key_head_dim
         self.head_v_dim = value_head_dim
         self.key_dim = self.head_k_dim * self.num_k_heads
@@ -786,14 +791,21 @@ def _main():
     import fla_npu  # noqa: F401
 
     parser = argparse.ArgumentParser()
+    parser.add_argument("--case-name", default="", help="Example/ST case name for CI logs")
     parser.add_argument("--device", type=int, default=2)
-    parser.add_argument("--heads", type=int, default=32)
+    parser.add_argument("--batch", type=int, default=1)
+    parser.add_argument("--heads", type=int, default=32, help="legacy alias for --query-heads and --value-heads")
+    parser.add_argument("--query-heads", type=int, default=None)
+    parser.add_argument("--value-heads", type=int, default=None)
     parser.add_argument("--tokens", type=int, default=65536)
-    parser.add_argument("--dim", type=int, default=128)
+    parser.add_argument("--dim", type=int, default=128, help="legacy alias for --key-dim")
+    parser.add_argument("--key-dim", type=int, default=None)
     parser.add_argument("--value-dim", type=int, default=128)
     parser.add_argument("--chunk-size", type=int, default=64)
     parser.add_argument("--dtype", choices=["fp16", "bf16"], default="bf16")
     parser.add_argument("--mean-len", type=int, default=1024)
+    parser.add_argument("--varlen", dest="varlen", action="store_true", default=True)
+    parser.add_argument("--no-varlen", dest="varlen", action="store_false")
     parser.add_argument(
         "--demo-model",
         action="store_true",
@@ -806,27 +818,54 @@ def _main():
     torch.npu.set_compile_mode(jit_compile=False)
 
     dtype = torch.float16 if args.dtype == "fp16" else torch.bfloat16
-    varlen = True
-    batch = 1
+    query_heads = args.query_heads if args.query_heads is not None else args.heads
+    value_heads = args.value_heads if args.value_heads is not None else args.heads
+    key_dim = args.key_dim if args.key_dim is not None else args.dim
+    value_dim = args.value_dim
+    batch = args.batch
     device = f"npu:{args.device}"
+    positive_values = {
+        "batch": batch,
+        "tokens": args.tokens,
+        "query_heads": query_heads,
+        "value_heads": value_heads,
+        "key_dim": key_dim,
+        "value_dim": value_dim,
+        "chunk_size": args.chunk_size,
+        "mean_len": args.mean_len,
+    }
+    for name, value in positive_values.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive, got {value}.")
+    if args.varlen and batch != 1:
+        raise ValueError("varlen smoke currently requires batch=1. Use --no-varlen for B > 1 cases.")
+    if value_heads % query_heads != 0:
+        raise ValueError(
+            "value_heads must be an integer multiple of query_heads for the current grouped-value smoke path, "
+            f"got query_heads={query_heads}, value_heads={value_heads}."
+        )
 
     if args.demo_model:
-        hidden_size = args.heads * args.dim
+        if batch != 1:
+            raise ValueError("demo_model smoke currently requires batch=1.")
+        hidden_size = query_heads * key_dim
         if hidden_size <= 0:
-            raise ValueError("hidden_size = heads * dim 非法")
-        cu_seqlens = _build_mean_1k_cu_seqlens(
-            total_tokens=args.tokens,
-            chunk_size=args.chunk_size,
-            device=device,
-            mean_len=args.mean_len,
-        )
-        x = torch.randn(1, args.tokens, hidden_size, dtype=dtype, device=device, requires_grad=True)
+            raise ValueError("hidden_size = query_heads * key_dim 非法")
+        cu_seqlens = None
+        if args.varlen:
+            cu_seqlens = _build_mean_1k_cu_seqlens(
+                total_tokens=args.tokens,
+                chunk_size=args.chunk_size,
+                device=device,
+                mean_len=args.mean_len,
+            )
+        x = torch.randn(batch, args.tokens, hidden_size, dtype=dtype, device=device, requires_grad=True)
         net = DemoGatedDeltaNet(
             hidden_size,
-            num_value_heads=args.heads,
-            num_key_heads=args.heads,
-            key_head_dim=args.dim,
-            value_head_dim=args.value_dim,
+            num_value_heads=value_heads,
+            num_key_heads=query_heads,
+            key_head_dim=key_dim,
+            value_head_dim=value_dim,
             conv_kernel_dim=args.conv_kernel,
             chunk_size=args.chunk_size,
         ).to(device=device, dtype=dtype)
@@ -846,14 +885,14 @@ def _main():
         )
         return
 
-    q = torch.randn(batch, args.heads, args.tokens, args.dim, dtype=dtype, device=device)
-    k = torch.randn(batch, args.heads, args.tokens, args.dim, dtype=dtype, device=device)
-    v = torch.randn(batch, args.heads, args.tokens, args.value_dim, dtype=dtype, device=device)
-    beta = torch.rand(batch, args.tokens, args.heads, dtype=dtype, device=device).sigmoid()
-    g = F.logsigmoid(torch.randn(batch, args.tokens, args.heads, dtype=dtype, device=device))
+    q = torch.randn(batch, query_heads, args.tokens, key_dim, dtype=dtype, device=device)
+    k = torch.randn(batch, query_heads, args.tokens, key_dim, dtype=dtype, device=device)
+    v = torch.randn(batch, value_heads, args.tokens, value_dim, dtype=dtype, device=device)
+    beta = torch.rand(batch, args.tokens, value_heads, dtype=dtype, device=device).sigmoid()
+    g = F.logsigmoid(torch.randn(batch, args.tokens, value_heads, dtype=dtype, device=device))
 
     cu_seqlens = None
-    if varlen:
+    if args.varlen:
         cu_seqlens = _build_mean_1k_cu_seqlens(
             total_tokens=args.tokens,
             chunk_size=args.chunk_size,
@@ -871,14 +910,16 @@ def _main():
 
     print(
         "config:",
+        f"case={args.case_name or '<direct>'}",
         f"B={batch}",
-        f"H={args.heads}",
+        f"QH={query_heads}",
+        f"VH={value_heads}",
         f"T={args.tokens}",
-        f"K={args.dim}",
-        f"V={args.value_dim}",
+        f"K={key_dim}",
+        f"V={value_dim}",
         f"chunk_size={args.chunk_size}",
         f"dtype={args.dtype}",
-        f"varlen={varlen}",
+        f"varlen={args.varlen}",
         f"device={device}",
     )
 
@@ -889,9 +930,16 @@ def _main():
     g.requires_grad_(True)
 
     torch.npu.synchronize()
+    attn_q = q
+    attn_k = k
+    if query_heads != value_heads:
+        repeat = value_heads // query_heads
+        attn_q = q.repeat_interleave(repeat, dim=1)
+        attn_k = k.repeat_interleave(repeat, dim=1)
+        print("grouped value heads:", f"repeat={repeat}", f"attn_heads={attn_q.shape[1]}")
     o, final_state = flash_gated_delta_rule(
-        q,
-        k,
+        attn_q,
+        attn_k,
         v,
         g=g,
         beta=beta,
