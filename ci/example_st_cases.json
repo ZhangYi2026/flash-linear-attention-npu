@@ -13,7 +13,12 @@
     "Vdim": 128,
     "dtype": "bf16",
     "mean_len": 1024,
+    "gate_source": "g",
+    "gate_function": "logsigmoid",
     "varlen": true,
+    "initial_state": "none",
+    "output_final_state": false,
+    "qk_l2norm": true,
     "demo_model": false
   }
 ]

@@ -15,7 +15,7 @@
    脚本会在宿主机上自动选择一张物理卡，例如 `ASCEND_RT_VISIBLE_DEVICES=2`。进入容器后，这张卡通常映射成逻辑设备 `0`。所以 CI 中传给 PyTorch example 的设备号默认是 `CI_CONTAINER_DEVICE=0`。
 
 3. **Example ST 必跑，shape 由用例文件统一管理。**
-   CI 默认执行 `ci/example_st_cases.json` 中 `enabled=true` 的用例。当前 `case1_current_default` 保持原始 shape；后续 GVA、`Vdim=256` 等场景通过新增用例显式配置 `B`、`T`、`chunk_size`、`query_head`、`value_head`、`Kdim`、`Vdim` 等字段。
+   CI 默认执行 `ci/example_st_cases.json` 中 `enabled=true` 的用例。当前 `case1_current_default` 保持原始 shape；后续 GVA、`Vdim=256` 等场景通过新增用例显式配置 `B`、`T`、`chunk_size`、`query_head`、`value_head`、`Kdim`、`Vdim` 等 shape 字段，以及 `gate_source`、`gate_function`、`initial_state`、`output_final_state`、`qk_l2norm` 等行为字段。
 
 4. **Ascend PyTorch 必须使用 `v26.1.0-beta.1` release family。**
    该 release 修复了 GDN 自定义适配中 `aclnn_extension` 未传 stream 导致算子间数据同步不生效的问题。镜像中直接安装 GitCode release 页面提供的 `torch_npu` wheel，该 wheel 已包含 `torchnpugen`，不要再拉 `op-plugin` 仓库重新编译。
