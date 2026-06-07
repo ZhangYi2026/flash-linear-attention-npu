@@ -17,9 +17,9 @@
 
 ## 合入检视
 
-PR 合入前需要上述维护账号中的 2 个账号在当前 head commit 上检视通过。`仓库规则 / 维护者检视门禁` workflow 会检查有效审批数，并排除 PR 提交人自己的审批。
+PR 合入前需要上述维护账号中的 2 个账号在当前 head commit 上检视通过。`仓库规则` workflow 会把 `仓库规则 / 维护者检视门禁` commit status 写到当前 head commit 上，并排除 PR 提交人自己的审批。审批未满足时该状态保持 `pending`，审批满足后变为 `success`，避免 PR Checks 历史中留下“审批未完成”的红色失败记录。
 
-`.github/CODEOWNERS` 将全仓默认归属到维护账号组，便于 GitHub 自动请求检视。仓库管理员应将 `仓库规则 / 维护者检视门禁` 配置为 `main` 分支必需状态检查。
+`.github/CODEOWNERS` 将全仓默认归属到维护账号组，便于 GitHub 自动请求检视。仓库管理员应将 `仓库规则 / 维护者检视门禁` commit status 配置为 `main` 分支必需状态检查。
 
 ## ABI 兼容性门禁
 
