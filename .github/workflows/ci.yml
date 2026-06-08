@@ -287,32 +287,32 @@ jobs:
       CI_RUN_EXAMPLE_ST: 'true'
       CI_IMAGE: fla-npu-ci:8.5.0-910b
     steps:
-      - name: 拉取 PR 代码（第 1 次）
+      - name: 拉取 PR 合并后代码（第 1 次）
         id: checkout_pr_1
         continue-on-error: true
         timeout-minutes: 10
         uses: actions/checkout@v4
         with:
-          repository: ${{ needs.prepare.outputs.head_repo }}
-          ref: ${{ needs.prepare.outputs.head_sha }}
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ needs.prepare.outputs.pr_number }}/merge
           fetch-depth: 1
           path: repo
 
-      - name: 等待后重试拉取 PR 代码
+      - name: 等待后重试拉取 PR 合并后代码
         if: steps.checkout_pr_1.outcome == 'failure'
         run: |
           rm -rf repo
           sleep 15
 
-      - name: 拉取 PR 代码（第 2 次）
+      - name: 拉取 PR 合并后代码（第 2 次）
         id: checkout_pr_2
         if: steps.checkout_pr_1.outcome == 'failure'
         continue-on-error: true
         timeout-minutes: 10
         uses: actions/checkout@v4
         with:
-          repository: ${{ needs.prepare.outputs.head_repo }}
-          ref: ${{ needs.prepare.outputs.head_sha }}
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ needs.prepare.outputs.pr_number }}/merge
           fetch-depth: 1
           path: repo
 
@@ -322,13 +322,13 @@ jobs:
           rm -rf repo
           sleep 30
 
-      - name: 拉取 PR 代码（第 3 次）
+      - name: 拉取 PR 合并后代码（第 3 次）
         if: steps.checkout_pr_1.outcome == 'failure' && steps.checkout_pr_2.outcome == 'failure'
         timeout-minutes: 10
         uses: actions/checkout@v4
         with:
-          repository: ${{ needs.prepare.outputs.head_repo }}
-          ref: ${{ needs.prepare.outputs.head_sha }}
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ needs.prepare.outputs.pr_number }}/merge
           fetch-depth: 1
           path: repo
 
@@ -378,7 +378,7 @@ jobs:
         run: |
           # CI 执行脚本必须来自默认分支，避免 PR 修改脚本后影响 runner。
           # 但 Example/ST 用例配置属于被验证内容：新 PR 中新增或修改的 enabled 用例
-          # 必须跟随 PR head commit 一起进入容器，并被 /run-npu-ci quick 实际执行验证。
+          # 必须跟随 PR merge ref 一起进入容器，并被 /run-npu-ci quick 实际执行验证。
           tmp_cases="$(mktemp)"
           if [ -f repo/ci/example_st_cases.json ]; then
             cp repo/ci/example_st_cases.json "$tmp_cases"
