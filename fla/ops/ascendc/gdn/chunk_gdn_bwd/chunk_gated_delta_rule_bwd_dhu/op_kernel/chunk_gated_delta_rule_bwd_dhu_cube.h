@@ -1,0 +1,726 @@
+/**
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ */
+
+/*!
+ * \file chunk_gated_delta_rule_bwd_dhu_vec.h
+ * \brief
+ */
+#ifndef CHUNK_GATED_DELTA_RULE_BWD_DHU_CUBE_H
+#define CHUNK_GATED_DELTA_RULE_BWD_DHU_CUBE_H
+#endif
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    #define CATLASS_ARCH 3510
+#else
+    #define CATLASS_ARCH 2201
+#endif
+
+#include "chunk_gated_delta_rule_bwd_dhu_base.h"
+#include "catlass/catlass.hpp"
+#include "catlass/arch/resource.hpp"
+#include "catlass/coord.hpp"
+#include "catlass/gemm_coord.hpp"
+#include "catlass/gemm/dispatch_policy.hpp"
+#include "catlass/gemm/helper.hpp"
+#include "catlass/gemm/tile/tile_copy.hpp"
+#include "catlass/gemm/tile/tile_mmad.hpp"
+#include "tla/layout.hpp"
+#include "tla/tensor.hpp"
+
+
+using namespace Catlass;
+using namespace tla;
+using namespace ChunkGDRBwdDhu;
+
+namespace Catlass::Gemm::Kernel {
+
+template <
+    class ArchTag_,
+    typename DT,
+    class L1TileShapeBdv_,
+    class L0TileShapeBdv_,
+    class TileCopyBdv_,
+    class L1TileShapeDh_,
+    class L0TileShapeDh_,
+    class TileCopyDh1_,
+    class TileCopyDh2_
+>
+class ChunkGDRBwdDhuTla{
+public:
+    using ArchTag = ArchTag_;
+    using ElementK = DT;
+    using ElementDh = DT;
+    using ElementGq = DT;
+    using ElementW = DT;
+    using ElementDo = DT;
+    using ElementDv2 = DT;
+    using ElementAccumulator = float;
+    using ElementInt = int64_t;
+
+    using TileCopyBdv = TileCopyBdv_;
+    using LayoutK = typename TileCopyBdv::LayoutA;
+    using LayoutDh = typename TileCopyBdv::LayoutB;
+    using LayoutBdv = typename TileCopyBdv::LayoutC;
+    using CopyL1ToL0A_Bdv = typename TileCopyBdv::CopyL1ToL0A;
+    using CopyL1ToL0B_Bdv = typename TileCopyBdv::CopyL1ToL0B;
+    using LayoutTagL1A_Bdv = typename TileCopyBdv::LayoutTagL1A;
+    using LayoutTagL1B_Bdv = typename TileCopyBdv::LayoutTagL1B;
+    using LayoutTagL0A_Bdv = typename TileCopyBdv::LayoutTagL0A;
+    using LayoutTagL0B_Bdv = typename TileCopyBdv::LayoutTagL0B;
+    using L1AAlignHelper = typename TileCopyBdv::L1AAlignHelper;
+    using L1BAlignHelper = typename TileCopyBdv::L1BAlignHelper;
+
+    using TileCopyDh1 = TileCopyDh1_;
+    using LayoutGq = typename TileCopyDh1::LayoutA;
+    using LayoutDo = typename TileCopyDh1::LayoutB;
+    using LayoutBdh = typename TileCopyDh1::LayoutC;
+    using CopyL1ToL0A_Dh1 = typename TileCopyDh1::CopyL1ToL0A;
+    using CopyL1ToL0B_Dh1 = typename TileCopyDh1::CopyL1ToL0B;
+    using LayoutTagL1A_Dh1 = typename TileCopyDh1::LayoutTagL1A;
+    using LayoutTagL1B_Dh1 = typename TileCopyDh1::LayoutTagL1B;
+    using LayoutTagL0A_Dh1 = typename TileCopyDh1::LayoutTagL0A;
+    using LayoutTagL0B_Dh1 = typename TileCopyDh1::LayoutTagL0B;
+
+    using TileCopyDh2 = TileCopyDh2_;
+    using LayoutW = typename TileCopyDh2::LayoutA;
+    using LayoutDv2 = typename TileCopyDh2::LayoutB;
+    using CopyL1ToL0A_Dh2 = typename TileCopyDh2::CopyL1ToL0A;
+    using CopyL1ToL0B_Dh2 = typename TileCopyDh2::CopyL1ToL0B;
+    using LayoutTagL1A_Dh2 = typename TileCopyDh2::LayoutTagL1A;
+    using LayoutTagL1B_Dh2 = typename TileCopyDh2::LayoutTagL1B;
+    using LayoutTagL0A_Dh2 = typename TileCopyDh2::LayoutTagL0A;
+    using LayoutTagL0B_Dh2 = typename TileCopyDh2::LayoutTagL0B;
+
+
+    using L1TileShapeBdv = L1TileShapeBdv_;
+    using L0TileShapeBdv = L0TileShapeBdv_;
+    static constexpr uint32_t L1_TILE_M_BDV = tla::get<0>(L1TileShapeBdv{}); // BT 128
+    static constexpr uint32_t L1_TILE_N_BDV = tla::get<1>(L1TileShapeBdv{}); // V 256
+    static constexpr uint32_t L1_TILE_K_BDV = tla::get<2>(L1TileShapeBdv{}); // K 128
+    
+    static constexpr uint32_t L0_TILE_M_BDV = tla::get<0>(L0TileShapeBdv{}); // K 128
+    static constexpr uint32_t L0_TILE_N_BDV = tla::get<1>(L0TileShapeBdv{}); // V 256
+    static constexpr uint32_t L0_TILE_K_BDV = tla::get<2>(L0TileShapeBdv{}); // BT 128
+
+    static constexpr auto L1A_LAYOUT_BDV = tla::MakeLayout<ElementK, LayoutTagL1A_Bdv>(Int<L1_TILE_M_BDV>{}, Int<L1_TILE_K_BDV>{});
+    static constexpr auto L1B_LAYOUT_BDV = tla::MakeLayout<ElementDh, LayoutTagL1B_Bdv>(Int<L1_TILE_K_BDV>{}, Int<L1_TILE_N_BDV>{});
+
+    static constexpr uint32_t L1A_TILE_SIZE_BDV = L1_TILE_M_BDV * L1_TILE_K_BDV * sizeof(ElementK);
+    static constexpr uint32_t L1B_TILE_SIZE_BDV = L1_TILE_N_BDV * L1_TILE_K_BDV * sizeof(ElementK);
+
+    using KType = Gemm::GemmType<ElementK, LayoutK>;
+    using DhType = Gemm::GemmType<ElementDh, LayoutDh>;
+
+    using TileMmadBdv = Gemm::Tile::TileMmadTla<ArchTag, KType, LayoutTagL1A_Bdv>;
+
+    using L1TileShapeDh = L1TileShapeDh_;
+    using L0TileShapeDh = L0TileShapeDh_;
+    static constexpr uint32_t L1_TILE_M_DH = tla::get<0>(L1TileShapeDh{});
+    static constexpr uint32_t L1_TILE_N_DH = tla::get<1>(L1TileShapeDh{});
+    static constexpr uint32_t L1_TILE_K_DH = tla::get<2>(L1TileShapeDh{});
+    static constexpr uint32_t L0_TILE_M_DH = tla::get<0>(L0TileShapeDh{});
+    static constexpr uint32_t L0_TILE_N_DH = tla::get<1>(L0TileShapeDh{});
+    static constexpr uint32_t L0_TILE_K_DH = tla::get<2>(L0TileShapeDh{});
+    static constexpr auto L1A_LAYOUT_DH1 = tla::MakeLayout<ElementGq, LayoutTagL1A_Dh1>(Int<L1_TILE_M_DH>{}, Int<L1_TILE_K_DH>{});
+    static constexpr auto L1B_LAYOUT_DH1 = tla::MakeLayout<ElementDo, LayoutTagL1B_Dh1>(Int<L1_TILE_K_DH>{}, Int<L1_TILE_N_DH>{});
+    static constexpr uint32_t L1A_TILE_SIZE_DH = L1_TILE_M_DH * L1_TILE_K_DH * sizeof(ElementGq);
+    static constexpr uint32_t L1B_TILE_SIZE_DH = L1_TILE_N_DH * L1_TILE_K_DH * sizeof(ElementGq);
+
+    using GqType = Gemm::GemmType<ElementGq, LayoutGq>;
+    using DoType = Gemm::GemmType<ElementDo, LayoutDo>;
+    using TileMmadDh1 = Gemm::Tile::TileMmadTla<ArchTag, GqType, LayoutTagL1A_Dh1>;
+
+    using WType = Gemm::GemmType<ElementW, LayoutW>;
+    using TileMmadDh2 = Gemm::Tile::TileMmadTla<ArchTag, WType, LayoutTagL1A_Dh2>;
+
+    static constexpr auto L1A_LAYOUT_DH2 = tla::MakeLayout<ElementW, LayoutTagL1A_Dh2>(Int<L1_TILE_M_DH>{}, Int<L1_TILE_K_DH>{});
+    static constexpr auto L1B_LAYOUT_DH2 = tla::MakeLayout<ElementDv2, LayoutTagL1B_Dh2>(Int<L1_TILE_K_DH>{}, Int<L1_TILE_N_DH>{});
+
+    struct Params {
+        GM_ADDR k;
+        LayoutK layoutK;
+        GM_ADDR dh; // from output dh
+        LayoutDh layoutDh;
+        GM_ADDR workspace; // gQ from ws
+        LayoutBdv layoutBdv;
+        LayoutGq layoutGq;
+        GM_ADDR dO;
+        LayoutDo layoutDo;
+        GM_ADDR w;
+        LayoutW layoutW;
+        GM_ADDR dv2;
+        LayoutDv2 layoutDv2;
+        LayoutBdh layoutBdh;
+        GM_ADDR cu_seqlens; 
+        uint64_t B = 0;
+        uint64_t T = 0;
+        uint64_t H = 0;
+        uint64_t K = 0;
+        uint64_t V = 0;
+        uint64_t BT = 0;
+        uint64_t chunkNum = 0;
+        uint64_t seqNum = 0;
+        uint64_t usedCoreNum = 0;
+        bool isVarLen = false;
+        uint64_t bdvWorkspaceOffset = 0;
+        uint64_t gQWorkspaceOffset = 0;
+        uint64_t bdhTerm1WorkspaceOffset = 0;
+        uint64_t bdhTerm2WorkspaceOffset = 0;
+
+
+        CATLASS_HOST_DEVICE
+        Params() {}
+
+        CATLASS_HOST_DEVICE
+        Params(GM_ADDR k_, LayoutK layoutK_, GM_ADDR dh_, LayoutDh layoutDh_, GM_ADDR workspace_,  LayoutBdv layoutBdv_, 
+               LayoutGq layoutGq_, GM_ADDR dO_, LayoutDo layoutDo_,    
+               GM_ADDR w_ , LayoutW layoutW_, GM_ADDR dv2_ , LayoutDv2 layoutDv2_, LayoutBdh layoutBdh_,
+               GM_ADDR cu_seqlens_, uint64_t B_, uint64_t T_, uint64_t H_, uint64_t K_, uint64_t V_,
+               uint64_t BT_, uint64_t chunkNum_, uint64_t seqNum_, uint64_t usedCoreNum_, bool isVarLen_,
+               uint64_t bdvWorkspaceOffset_, uint64_t gQWorkspaceOffset_,uint64_t bdhTerm1WorkspaceOffset_, uint64_t bdhTerm2WorkspaceOffset_): 
+            k(k_), 
+            layoutK(layoutK_),
+            dh(dh_),
+            layoutDh(layoutDh_),
+            workspace(workspace_), 
+            layoutBdv(layoutBdv_),
+            layoutGq(layoutGq_),
+            dO(dO_),
+            layoutDo(layoutDo_),
+            w(w_),
+            layoutW(layoutW_),
+            dv2(dv2_),
+            layoutDv2(layoutDv2_),
+            layoutBdh(layoutBdh_),
+            cu_seqlens(cu_seqlens_),
+            B(B_), 
+            T(T_), 
+            H(H_), 
+            K(K_), 
+            V(V_), 
+            BT(BT_),
+            chunkNum(chunkNum_),
+            seqNum(seqNum_),
+            usedCoreNum(usedCoreNum_),
+            isVarLen(isVarLen_),
+            bdvWorkspaceOffset(bdvWorkspaceOffset_),
+            gQWorkspaceOffset(gQWorkspaceOffset_),
+            bdhTerm1WorkspaceOffset(bdhTerm1WorkspaceOffset_),
+            bdhTerm2WorkspaceOffset(bdhTerm2WorkspaceOffset_)
+            {}
+    };
+
+    CATLASS_HOST_DEVICE
+    ChunkGDRBwdDhuTla() {}
+
+    template <int32_t CORE_TYPE = g_coreType>
+    CATLASS_DEVICE
+    void operator()(Params const &params);
+
+    /// Executes one Matmul
+    template <>
+    CATLASS_DEVICE
+    void operator()<AscendC::AIC>(Params const &params) {
+        GemmCoord ProblemShapeQdh{static_cast<uint32_t>(params.T),static_cast<uint32_t>(params.K), static_cast<uint32_t>(params.BT)}; 
+        Arch::Resource<ArchTag> resource;
+        if (params.isVarLen) {
+            gmCuSeqlens.SetGlobalBuffer((__gm__ ElementInt *)params.cu_seqlens);
+        }
+        uint64_t l1Offset = 0;
+        // | L1A_bdv 32k | L1B_bdv 64k | L1A_dh1 32k | L1B_dh1 64k | L1A_dh2 32k | L1B_dh2 64k | 
+        l1ATensorBdv = resource.l1Buf.template GetBufferByByte<ElementK>(l1Offset);
+        l1Offset += L1A_TILE_SIZE_BDV;
+        l1BTensorBdv = resource.l1Buf.template GetBufferByByte<ElementDh>(l1Offset);
+        l1Offset += L1B_TILE_SIZE_BDV;
+        l1ATensorDh1 = resource.l1Buf.template GetBufferByByte<ElementK>(l1Offset);
+        l1Offset += L1A_TILE_SIZE_DH;
+        l1BTensorDh1 = resource.l1Buf.template GetBufferByByte<ElementDh>(l1Offset);
+        l1Offset += L1B_TILE_SIZE_DH;
+        l1ATensorDh2 = resource.l1Buf.template GetBufferByByte<ElementK>(l1Offset);
+        l1Offset += L1A_TILE_SIZE_DH;
+        l1BTensorDh2 = resource.l1Buf.template GetBufferByByte<ElementDh>(l1Offset);
+        l1Offset += L1B_TILE_SIZE_DH;
+        // | L0A_bdv_k 32K* | L0B_bdv_dh 64k |
+        // | L0A_dh1_gq 32k | L0B_bdv_do 64k*|
+        // | L0A_dh2_w 32k* | L0B_bdv_dv2 64k|
+        l0ATensorBdv = resource.l0ABuf.template GetBufferByByte<ElementK>(0);
+        l0BTensorBdv = resource.l0BBuf.template GetBufferByByte<ElementDh>(0);
+        l0ATensorDh1 = resource.l0ABuf.template GetBufferByByte<ElementK>(0);
+        l0ATensorDh2 = resource.l0ABuf.template GetBufferByByte<ElementK>(L1A_TILE_SIZE_DH);
+        l0BTensorDh = resource.l0BBuf.template GetBufferByByte<ElementDh>(0);
+
+        l0CTensor = resource.l0CBuf.template GetBufferByByte<ElementAccumulator>(0);
+        {
+            // 每个核完成一个batch里的一个head的一个seqence里的所有chunk
+            uint32_t totalTaskNum = params.B * params.H * params.seqNum; // 等長seqNum=1
+            uint32_t coreIdx = GetBlockIdx();
+            for (uint32_t i = coreIdx; i < totalTaskNum; i += params.usedCoreNum) {
+                uint64_t b = 0;
+                int32_t curChunkNum = 0;
+                uint64_t curSeqLen = 0;
+                CaclOffset(i, curChunkNum, curSeqLen, params);
+                uint32_t curBT = 0;
+                for (int32_t chunkIdx = curChunkNum - 1; chunkIdx >= 0; chunkIdx --) {
+                    // cacl k @ dh
+                    if (chunkIdx == curChunkNum -1) {
+                        curBT = curSeqLen - chunkIdx * params.BT;
+                        // skip k_i @ dh_0
+                    } else {
+                        curBT = params.BT;  // BT = 64/128 is always 16 aligned
+                        // init GlobalTensor
+                        gmK.SetGlobalBuffer((__gm__ ElementK *)params.k + gmOffsetK + chunkIdx * params.BT * params.K);
+                         // 用的是上一次chunk迭代的结果
+                        gmDh.SetGlobalBuffer((__gm__ ElementDh *)params.dh + gmOffsetH + chunkIdx * params.K * params.V);
+                        gmWsBdv.SetGlobalBuffer((__gm__ ElementDh *)params.workspace + coreIdx * params.BT * params.V);
+                        auto tensorK = tla::MakeTensor(gmK, params.layoutK, Arch::PositionGM{});
+                        auto tensorDh = tla::MakeTensor(gmDh, params.layoutDh, Arch::PositionGM{});
+                        auto tensorBdv = tla::MakeTensor(gmWsBdv, params.layoutBdv, Arch::PositionGM{});
+                        // Make tiled views
+                        auto tensorBlockK = GetTile(tensorK,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(curBT, params.K));
+                        auto tensorBlockDh = GetTile(tensorDh,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(params.K, params.V));
+                        auto tensorBlockBdv = GetTile(tensorBdv,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(curBT, params.V));
+                        using CopyGmToL1A_Bdv = typename TileCopyBdv::template CopyGmToL1A<decltype(tensorBlockK)>;
+                        using CopyGmToL1B_Bdv = typename TileCopyBdv::template CopyGmToL1B<decltype(tensorBlockDh)>;
+#if (defined(CATLASS_ARCH) && CATLASS_ARCH == 3510)
+                        using CopyL0CToGm_Bdv = typename TileCopyBdv::template CopyL0CToDst<decltype(tensorBlockBdv)>;
+#else
+                        using CopyL0CToGm_Bdv = typename TileCopyBdv::template CopyL0CToGm<decltype(tensorBlockBdv)>;
+#endif
+                        CopyGmToL1A_Bdv copyGmToL1A_Bdv;
+                        CopyGmToL1B_Bdv copyGmToL1B_Bdv;
+                        CopyL0CToGm_Bdv copyL0CToGm_Bdv;
+
+                        PipeBarrier<PIPE_ALL>();
+                        // load L1A
+                        auto tensorL1A = tla::MakeTensor(l1ATensorBdv, L1A_LAYOUT_BDV, Arch::PositionL1{});
+                        auto tensorGmTileA = GetTile(tensorBlockK, tla::MakeCoord(0, 0), tla::MakeShape(curBT, params.K));
+                        copyGmToL1A_Bdv(tensorL1A, tensorGmTileA);
+                        PipeBarrier<PIPE_ALL>();
+
+                        // copy L1A -> L0A
+                        auto layoutAInL0 = tla::MakeLayout<ElementK, LayoutTagL0A_Bdv>(curBT, params.K);
+                        auto tensorL0A = tla::MakeTensor(l0ATensorBdv, layoutAInL0, Arch::PositionL0A{});
+                        auto tensorTileL1A = GetTile(tensorL1A, tla::MakeCoord(0, 0), tla::MakeShape(curBT, params.K));
+                        copyL1ToL0A_Bdv(tensorL0A, tensorTileL1A);
+                        PipeBarrier<PIPE_ALL>();
+
+                        // load L1B
+                        CrossCoreWaitFlag(CROSS_CORE_V2C_BDH);
+                        auto tensorL1B = tla::MakeTensor(l1BTensorBdv, L1B_LAYOUT_BDV, Arch::PositionL1{});
+                        auto tensorGmTileB = GetTile(tensorBlockDh, tla::MakeCoord(0, 0), tla::MakeShape(params.K, params.V));
+                        copyGmToL1B_Bdv(tensorL1B, tensorGmTileB);
+                        PipeBarrier<PIPE_ALL>();
+
+                        // copy L1B -> L0B
+                        auto layoutBInL0 = tla::MakeLayout<ElementDh, LayoutTagL0B_Bdv>(params.K, params.V);
+                        auto tensorL0B = tla::MakeTensor(l0BTensorBdv, layoutBInL0, Arch::PositionL0B{});
+                        auto tensorTileL1B = GetTile(tensorL1B,  tla::MakeCoord(0, 0), tla::MakeShape(params.K, params.V));
+                        copyL1ToL0B_Bdv(tensorL0B, tensorTileL1B);
+                        PipeBarrier<PIPE_ALL>();
+
+                        bool initC = true; //k方向没有循环
+                        uint8_t unitFlag = 0;
+                        auto layoutInL0C = tla::MakeLayoutL0C(curBT, params.V);
+                        auto tensorL0C = tla::MakeTensor(l0CTensor, layoutInL0C, Arch::PositionL0C{});
+                        auto tensorTileL0C = GetTile(tensorL0C,
+                                                     tla::MakeCoord(0,0),
+                                                     tla::MakeShape(curBT, params.V));
+                        tileMmadBdv(tensorTileL0C, tensorL0A, tensorL0B, initC, unitFlag);
+                        
+                        PipeBarrier<PIPE_ALL>();
+                        copyL0CToGm_Bdv(tensorBlockBdv, tensorL0C);
+                        PipeBarrier<PIPE_ALL>();
+                        CrossCoreSetFlag<0x2, PIPE_FIX>(CROSS_CORE_C2V_BDV); // 计算完一个chunk的bdv,通知vec可以开始计算对应的dv2
+                    } // end chunk k @ dh
+                    
+
+                    if (chunkIdx != 0)
+                    {
+                        gmGq.SetGlobalBuffer((__gm__ ElementGq *)params.workspace + params.gQWorkspaceOffset + coreIdx * params.BT * params.K);
+                        gmDo.SetGlobalBuffer((__gm__ ElementDo *)params.dO + gmOffsetV + chunkIdx * params.BT * params.V);
+                        gmDhTerm1.SetGlobalBuffer((__gm__ ElementDh *)params.workspace + params.bdhTerm1WorkspaceOffset + coreIdx * params.K * params.V);
+                        
+                        gmW.SetGlobalBuffer((__gm__ ElementW *)params.w + gmOffsetK + chunkIdx * params.BT * params.K);
+                        gmDv2.SetGlobalBuffer((__gm__ ElementDv2 *)params.dv2 + gmOffsetV + chunkIdx * params.BT * params.V);
+                        gmDhTerm2.SetGlobalBuffer((__gm__ ElementDh *)params.workspace + params.bdhTerm2WorkspaceOffset + coreIdx * params.K * params.V);
+
+                        auto tensorGq = tla::MakeTensor(gmGq, params.layoutGq, Arch::PositionGM{});
+                        auto tensorDo = tla::MakeTensor(gmDo, params.layoutDo, Arch::PositionGM{});
+                        auto tensorDh1 = tla::MakeTensor(gmDhTerm1, params.layoutDh, Arch::PositionGM{});
+                        auto tensorBlockGq = GetTile(tensorGq,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(params.K, curBT));
+                        auto tensorBlockDo = GetTile(tensorDo,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(curBT, params.V));
+                        auto tensorBlockDh1 = GetTile(tensorDh1,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(params.K, params.V));
+                        
+                        auto tensorW = tla::MakeTensor(gmW, params.layoutW, Arch::PositionGM{});
+                        auto tensorDv2 = tla::MakeTensor(gmDv2, params.layoutDv2, Arch::PositionGM{});
+                        auto tensorDh2 = tla::MakeTensor(gmDhTerm2, params.layoutDh, Arch::PositionGM{});
+                        auto tensorBlockW = GetTile(tensorW,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(params.K, curBT));
+                        auto tensorBlockDv2 = GetTile(tensorDv2,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(curBT, params.V));
+                        auto tensorBlockDh2 = GetTile(tensorDh2,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(params.K, params.V));
+
+                        using CopyGmToL1A_Dh1 = typename TileCopyDh1::template CopyGmToL1A<decltype(tensorBlockGq)>;
+                        using CopyGmToL1B_Dh1 = typename TileCopyDh1::template CopyGmToL1B<decltype(tensorBlockDo)>;
+#if (defined(CATLASS_ARCH) && CATLASS_ARCH == 3510)
+                        using CopyL0CToGm_Dh1 = typename TileCopyDh1::template CopyL0CToDst<decltype(tensorBlockDh1)>;
+#else
+                        using CopyL0CToGm_Dh1 = typename TileCopyDh1::template CopyL0CToGm<decltype(tensorBlockDh1)>;
+#endif
+                        CopyGmToL1A_Dh1 copyGmToL1A_Dh1;
+                        CopyGmToL1B_Dh1 copyGmToL1B_Dh1;
+                        CopyL0CToGm_Dh1 copyL0CToGm_Dh1;
+
+                        using CopyGmToL1A_Dh2 = typename TileCopyDh2::template CopyGmToL1A<decltype(tensorBlockW)>;
+                        using CopyGmToL1B_Dh2 = typename TileCopyDh2::template CopyGmToL1B<decltype(tensorBlockDv2)>;
+#if (defined(CATLASS_ARCH) && CATLASS_ARCH == 3510)
+                        using CopyL0CToGm_Dh2 = typename TileCopyDh2::template CopyL0CToDst<decltype(tensorBlockDh2)>;
+#else
+                        using CopyL0CToGm_Dh2 = typename TileCopyDh2::template CopyL0CToGm<decltype(tensorBlockDh2)>;
+#endif
+                        CopyGmToL1A_Dh2 copyGmToL1A_Dh2;
+                        CopyGmToL1B_Dh2 copyGmToL1B_Dh2;
+                        CopyL0CToGm_Dh2 copyL0CToGm_Dh2;
+
+                        auto tensorL1B1 = tla::MakeTensor(l1BTensorDh1, L1B_LAYOUT_DH1, Arch::PositionL1{});
+                        auto tensorGmTileB1 = GetTile(tensorBlockDo, tla::MakeCoord(0, 0), tla::MakeShape(curBT, params.V));
+
+                        auto tensorL1A2 = tla::MakeTensor(l1ATensorDh2, L1A_LAYOUT_DH1, Arch::PositionL1{});
+                        auto tensorGmTileA2 = GetTile(tensorBlockW, tla::MakeCoord(0, 0), tla::MakeShape(params.K, curBT));
+                        
+                        auto layoutBInL01 = tla::MakeLayout<ElementDo, LayoutTagL0B_Dh1>(curBT, params.V);
+                        auto tensorL0B1 = tla::MakeTensor(l0BTensorDh, layoutBInL01, Arch::PositionL0B{});
+                        auto tensorTileL1B1 = GetTile(tensorL1B1,  tla::MakeCoord(0, 0), tla::MakeShape(curBT, params.V));
+
+                        auto layoutAInL02 = tla::MakeLayout<ElementW, LayoutTagL0A_Dh2>(params.K, curBT);
+                        auto tensorL0A2 = tla::MakeTensor(l0ATensorDh2, layoutAInL02, Arch::PositionL0A{});
+                        auto tensorTileL1A2 = GetTile(tensorL1A2, tla::MakeCoord(0, 0), tla::MakeShape(params.K, curBT));
+                        
+                        auto tensorL1A1 = tla::MakeTensor(l1ATensorDh1, L1A_LAYOUT_DH1, Arch::PositionL1{});
+                        auto tensorGmTileA1 = GetTile(tensorBlockGq, tla::MakeCoord(0, 0), tla::MakeShape(params.K, curBT));
+
+                        auto layoutAInL01 = tla::MakeLayout<ElementGq, LayoutTagL0A_Dh1>(params.K, curBT);
+                        auto tensorL0A1 = tla::MakeTensor(l0ATensorDh1, layoutAInL01, Arch::PositionL0A{});
+                        auto tensorTileL1A1 = GetTile(tensorL1A1, tla::MakeCoord(0, 0), tla::MakeShape(params.K, curBT));
+
+                        bool initC = true; //k方向没有循环
+                        uint8_t unitFlag = 0;
+                        auto layoutInL0C = tla::MakeLayoutL0C(params.K, params.V);
+                        auto tensorL0C1 = tla::MakeTensor(l0CTensor, layoutInL0C, Arch::PositionL0C{});
+                        auto tensorTileL0C1 = GetTile(tensorL0C1,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(params.K, params.V));
+                        auto tensorL1B2 = tla::MakeTensor(l1BTensorDh2, L1B_LAYOUT_DH1, Arch::PositionL1{});
+                        auto tensorGmTileB2 = GetTile(tensorBlockDv2, tla::MakeCoord(0, 0), tla::MakeShape(curBT, params.V));
+                        
+                        auto layoutBInL02 = tla::MakeLayout<ElementDv2, LayoutTagL0B_Dh2>(curBT, params.V);
+                        auto tensorL0B2 = tla::MakeTensor(l0BTensorDh, layoutBInL02, Arch::PositionL0B{});
+                        auto tensorTileL1B2 = GetTile(tensorL1B2,  tla::MakeCoord(0, 0), tla::MakeShape(curBT, params.V));
+                        
+                        auto layoutInL0C2 = tla::MakeLayoutL0C(params.K, params.V);
+                        auto tensorL0C2 = tla::MakeTensor(l0CTensor, layoutInL0C2, Arch::PositionL0C{});
+                        auto tensorTileL0C2 = GetTile(tensorL0C2,
+                                                    tla::MakeCoord(0,0),
+                                                    tla::MakeShape(params.K, params.V));                        
+                        // gatedQ @ do
+                        // | bdv coreNum * K * V | gQ coreNum * BT * K | qDo coreNum * K * V | wDv2 coreNum * K * V | 
+                        PipeBarrier<PIPE_ALL>();
+                        // load L1B
+                        
+                        copyGmToL1B_Dh1(tensorL1B1, tensorGmTileB1);
+                        PipeBarrier<PIPE_ALL>();
+                        
+                        // w @ dv2 load L1A
+
+                        copyGmToL1A_Dh2(tensorL1A2, tensorGmTileA2);
+                        // PipeBarrier<PIPE_ALL>();
+
+                        // copy L1B -> L0B
+
+                        copyL1ToL0B_Dh1(tensorL0B1, tensorTileL1B1);
+                        PipeBarrier<PIPE_ALL>();
+
+                        // copy L1A -> L0A
+                        copyL1ToL0A_Dh2(tensorL0A2, tensorTileL1A2);
+                        // PipeBarrier<PIPE_ALL>();
+
+                        // load L1A
+                        CrossCoreWaitFlag(CROSS_CORE_V2C_GQ); // vec计算完一个chunk的gatedQ,通知cube可以开始计算对应的dh term1
+                        copyGmToL1A_Dh1(tensorL1A1, tensorGmTileA1);
+                        PipeBarrier<PIPE_ALL>();
+
+                        // copy L1A -> L0A
+
+                        copyL1ToL0A_Dh1(tensorL0A1, tensorTileL1A1);
+                        PipeBarrier<PIPE_ALL>();
+
+
+                        tileMmadDh1(tensorTileL0C1, tensorL0A1, tensorL0B1, initC, unitFlag);
+                        PipeBarrier<PIPE_ALL>();
+                        copyL0CToGm_Dh1(tensorBlockDh1, tensorL0C1);
+                        PipeBarrier<PIPE_ALL>();
+                        CrossCoreSetFlag<0x2, PIPE_FIX>(CROSS_CORE_C2V_TERM1);
+
+                        // w @ dv2 -> bdh_term2
+                        // PipeBarrier<PIPE_ALL>();
+                        // load L1B
+                        CrossCoreWaitFlag(CROSS_CORE_V2C_DV2);
+                        copyGmToL1B_Dh2(tensorL1B2, tensorGmTileB2);
+                        PipeBarrier<PIPE_ALL>();
+
+                        // copy L1B -> L0B
+
+                        copyL1ToL0B_Dh2(tensorL0B2, tensorTileL1B2);
+                        PipeBarrier<PIPE_ALL>();
+
+                        // bool initC = true; //k方向没有循环
+                        // uint8_t unitFlag = 0;
+                        tileMmadDh2(tensorTileL0C2, tensorL0A2, tensorL0B2, initC, unitFlag);
+                        PipeBarrier<PIPE_ALL>();
+                        copyL0CToGm_Dh2(tensorBlockDh2, tensorL0C2);
+                        PipeBarrier<PIPE_ALL>();
+                        CrossCoreSetFlag<0x2, PIPE_FIX>(CROSS_CORE_C2V_TERM2);
+                    }
+                }
+            }
+        }
+        return;
+    }
+    
+private:
+    CATLASS_DEVICE void CaclOffset(const uint32_t taskIdx, int32_t& curChunkNum, uint64_t& curSeqLen, Params const& params)
+    {
+        uint64_t seqStartOffset = 0;
+        uint64_t preChunkNum = 0;
+        uint64_t b = 0;
+        uint32_t h = taskIdx % params.H; // 当前任务在第几个h 
+        if (params.isVarLen) {
+            uint32_t seqIdx = taskIdx / params.H; // 当前任务在第几个seq
+            // {0, 96, 224, 320} [0, 2, 4， 6]
+            seqStartOffset = gmCuSeqlens.GetValue(seqIdx); // 当前seq在T中的起始索引
+            uint64_t seqEndOffset = gmCuSeqlens.GetValue(seqIdx+1); // 当前seq在T中的结束索引
+            curSeqLen = seqEndOffset - seqStartOffset;
+            uint64_t tailChunkLen = curSeqLen % params.BT; 
+            // 计算当前seq的起始chunkIdx
+            uint64_t tmpStartOffset = 0;
+            uint64_t tmpEndOffset = 0;
+            uint64_t tmpChunkNum = 0;
+            for (uint32_t seq = 0; seq < seqIdx; seq++) {
+                tmpStartOffset = gmCuSeqlens.GetValue(seq); // 当前seq在T中的起始索引
+                tmpEndOffset = gmCuSeqlens.GetValue(seq+1); // 当前seq在T中的结束索引
+                auto tmpChunkNum = ((tmpEndOffset - tmpStartOffset) + params.BT - 1) / params.BT;
+                preChunkNum += tmpChunkNum;
+            }
+            curChunkNum = (curSeqLen + params.BT - 1) / params.BT; // 当前seq的chunk数
+            // calc offset
+        } else {
+            curChunkNum = params.chunkNum;
+            b = taskIdx / params.H;
+            curSeqLen = params.T;
+        }
+        gmOffsetK = (b * params.H + h) * params.T * params.K + seqStartOffset * params.K;
+        gmOffsetH = (b * params.H + h) * params.chunkNum * params.K * params.V + 
+                    preChunkNum * params.K * params.V; // [B,H,chunk_num,K,V]
+        gmOffsetV = (b * params.H + h) * params.T * params.V + seqStartOffset * params.V;
+    }
+
+    AscendC::GlobalTensor<ElementInt> gmCuSeqlens;
+
+    AscendC::GlobalTensor<ElementK> gmK; // [B,H,T,K]
+    AscendC::GlobalTensor<ElementDh> gmDh; // [B,H,chunkNum,K,V]
+    AscendC::GlobalTensor<ElementDh> gmWsBdv;
+
+    AscendC::GlobalTensor<ElementGq> gmGq;
+    AscendC::GlobalTensor<ElementDo> gmDo;
+    AscendC::GlobalTensor<ElementDh> gmDhTerm1;
+    
+    AscendC::GlobalTensor<ElementDh> gmW;
+    AscendC::GlobalTensor<ElementDh> gmDv2;
+    AscendC::GlobalTensor<ElementDh> gmDhTerm2;
+
+    AscendC::LocalTensor<DT> l1ATensorBdv;
+    AscendC::LocalTensor<DT> l1BTensorBdv;
+    AscendC::LocalTensor<DT> l0ATensorBdv;
+    AscendC::LocalTensor<DT> l0BTensorBdv;
+    AscendC::LocalTensor<DT> l1ATensorDh1;
+    AscendC::LocalTensor<DT> l1BTensorDh1;
+    AscendC::LocalTensor<DT> l1ATensorDh2;
+    AscendC::LocalTensor<DT> l1BTensorDh2;
+    AscendC::LocalTensor<DT> l0ATensorDh1;
+    AscendC::LocalTensor<DT> l0ATensorDh2;
+    AscendC::LocalTensor<DT> l0BTensorDh;
+    AscendC::LocalTensor<ElementAccumulator> l0CTensor;
+
+    int32_t l1AEventId = 0;
+    int32_t l1BEventId = 1;
+    int32_t l0AEventId = 0;
+    int32_t l0BEventId = 1;
+    int32_t bdvMMEventId = 0; 
+    int32_t mm2mte1EventId = 0;
+
+    CopyL1ToL0A_Bdv copyL1ToL0A_Bdv;
+    CopyL1ToL0B_Bdv copyL1ToL0B_Bdv;
+    CopyL1ToL0A_Dh1 copyL1ToL0A_Dh1;
+    CopyL1ToL0A_Dh2 copyL1ToL0A_Dh2;
+    CopyL1ToL0B_Dh1 copyL1ToL0B_Dh1;
+    CopyL1ToL0B_Dh2 copyL1ToL0B_Dh2;
+    TileMmadBdv tileMmadBdv;
+    TileMmadDh1 tileMmadDh1;
+    TileMmadDh2 tileMmadDh2;
+
+    uint64_t gmOffsetK = 0;
+    uint64_t gmOffsetV = 0;
+    uint64_t gmOffsetH = 0;
+};
+}
+
+
+
+template <typename DT, typename GT>
+class GDRCube : public GDRBase<DT, GT>
+{
+public:
+    __aicore__ inline GDRCube(GM_ADDR k_, GM_ADDR w_, GM_ADDR dO_, GM_ADDR dh_, GM_ADDR dv2_, GM_ADDR cu_seqlens_, 
+                              GM_ADDR chunk_indices_, GM_ADDR workspace_);
+    __aicore__ inline void Process();
+    __aicore__ inline void Init(const ChunkGatedDeltaRuleBwdDhuTilingData& tilingData);
+private:
+    GM_ADDR workspaceGq;
+    GM_ADDR k;
+    GM_ADDR w;
+    GM_ADDR dO;
+    GM_ADDR dh;
+    GM_ADDR dv2;
+    GM_ADDR cu_seqlens;
+    GM_ADDR chunk_indices;
+    GM_ADDR workspace;
+
+}; // class GDRCube
+
+template <typename DT, typename GT>
+__aicore__ inline GDRCube<DT, GT>::GDRCube(GM_ADDR k_, GM_ADDR w_, GM_ADDR dO_, GM_ADDR dh_, GM_ADDR dv2_, GM_ADDR cu_seqlens_, 
+                                       GM_ADDR chunk_indices_, GM_ADDR workspace_)
+:
+    k(k_),
+    w(w_),
+    dO(dO_),
+    dh(dh_),
+    dv2(dv2_),
+    cu_seqlens(cu_seqlens_),
+    chunk_indices(chunk_indices_),
+    workspace(workspace_)
+    {};
+
+template <typename DT, typename GT>
+__aicore__ inline void GDRCube<DT, GT>::Init(const ChunkGatedDeltaRuleBwdDhuTilingData& tilingData)
+{
+    GDRBase<DT, GT>::InitTilingData(tilingData);
+    return;
+}
+
+template <typename DT, typename GT>
+__aicore__ inline void GDRCube<DT, GT>::Process()
+{
+    uint64_t bdvWorkspaceOffset = 0;
+    uint64_t gQWorkspaceOffset = this->bdvWs;
+    uint64_t bdhTerm1WorkspaceOffset = gQWorkspaceOffset + this->qWs;
+    uint64_t bdhTerm2WorkspaceOffset = bdhTerm1WorkspaceOffset + this->qDoWs;
+    //输入
+    using LayoutTagK = layout::RowMajor;
+    using LayoutTagDh = layout::RowMajor;
+    using LayoutTagBdv = layout::RowMajor;
+
+    using LayoutTagGq = layout::ColumnMajor; // bt,k -> k, bt
+    using LayoutTagDo = layout::RowMajor; // bt,v
+    using LayoutTagBdh = layout::RowMajor; // k,v
+
+    using LayoutTagW = layout::ColumnMajor;
+    using LayoutTagDv2 = layout::RowMajor;
+
+    using LayoutTagCuSeqlens = layout::RowMajor;
+    using LayoutTagChunkIndices = layout::RowMajor;
+
+    using ElementHalf = half;
+    using ElementFloat = float;
+
+    //输入
+    LayoutTagK tagK = LayoutTagK::MakeLayout<ElementHalf>(this->T, this->K);
+    LayoutTagDh tagDh = LayoutTagDh::MakeLayout<ElementHalf>(this->K, this->V);
+    LayoutTagBdv tagBdv = LayoutTagBdv::MakeLayout<ElementHalf>(this->chunkSize, this->V);
+
+    LayoutTagGq tagGq = LayoutTagGq::MakeLayout<ElementHalf>(this->K, this->chunkSize);
+    LayoutTagDo tagDo = LayoutTagDo::MakeLayout<ElementHalf>(this->T, this->V);
+    LayoutTagBdh tagBdh = LayoutTagBdh::MakeLayout<ElementHalf>(this->K, this->V);
+
+    LayoutTagW tagW = LayoutTagW::MakeLayout<ElementHalf>(this->K, this->T);
+    LayoutTagDv2 tagDv2 = LayoutTagDv2::MakeLayout<ElementHalf>(this->T, this->V);
+
+    LayoutTagCuSeqlens tagCuSeqlens = LayoutTagCuSeqlens::MakeLayout<int64_t>(1, this->seqNum + 1);
+    LayoutTagChunkIndices tagChunkIndices = LayoutTagChunkIndices::MakeLayout<int64_t>(this->chunkNum, 2);
+
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    using ArchTag = Arch::Ascend950;
+#else
+    using ArchTag = Arch::AtlasA2;
+#endif
+
+    auto layoutK = MakeLayoutFromTag(tagK);
+    auto layoutDh = MakeLayoutFromTag(tagDh);
+    auto layoutBdv = MakeLayoutFromTag(tagBdv);
+
+    auto layoutGq = MakeLayoutFromTag(tagGq);
+    auto layoutDo = MakeLayoutFromTag(tagDo);
+    
+    auto layoutW = MakeLayoutFromTag(tagW);
+    auto layoutDv2 = MakeLayoutFromTag(tagDv2);
+
+    auto layoutBdh = MakeLayoutFromTag(tagBdh); // term1/term2相同
+
+    using TileCopyBdv =
+            Gemm::Tile::PackedTileCopyTla<ArchTag, DT, LayoutTagK, DT, LayoutTagDh, DT, LayoutTagBdv>;
+    using L1TileShapeBdv = tla::Shape<_128, _256, _128>; // BT, V, K
+    using L0TileShapeBdv = tla::Shape<_128, _256, _128>;
+
+    using TileCopyDh1 = 
+            Gemm::Tile::PackedTileCopyTla<ArchTag, DT, LayoutTagGq, DT, LayoutTagDo, DT, LayoutTagBdh>;
+    using TileCopyDh2 = 
+            Gemm::Tile::PackedTileCopyTla<ArchTag, DT, LayoutTagW, DT, LayoutTagDv2, DT, LayoutTagBdh>;
+    using L1TileShapeDh = tla::Shape<_128, _256, _128>; // K,V, BT
+    using L0TileShapeDh = tla::Shape<_128, _256, _128>;
+    // kernel level
+    using GDRKernel = Gemm::Kernel::ChunkGDRBwdDhuTla<ArchTag, DT,
+                                                      L1TileShapeBdv, L0TileShapeBdv, TileCopyBdv,
+                                                      L1TileShapeDh, L0TileShapeDh, TileCopyDh1, TileCopyDh2>;
+    this->pipe.Destroy();
+    GDRKernel kernel;
+    typename GDRKernel::Params param{k, layoutK, dh, layoutDh, workspace, layoutBdv, // k @ dh -> bdv[workspace ]
+                                     layoutGq, dO, layoutDo,                // gatedQ^T[workspace ] @ do -> bdh[workspace]
+                                     w, layoutW, dv2, layoutDv2, layoutBdh, // w^T @ dv2 -> bdh[workspace] 
+                                     cu_seqlens, this->B, this->T, this->H, this->K, this->V, 
+                                     this->chunkSize, this->chunkNum, this->seqNum, this->usedCoreNum, static_cast<bool>(this->isVarLen),
+                                     bdvWorkspaceOffset, gQWorkspaceOffset, bdhTerm1WorkspaceOffset, bdhTerm2WorkspaceOffset};
+    kernel(param);
+    return;
+}/*  */
