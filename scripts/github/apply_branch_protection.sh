@@ -22,7 +22,6 @@ curl -fsSL \
   "required_status_checks": {
     "strict": true,
     "contexts": [
-      "仓库规则 / 维护者检视门禁",
       "NPU CI / 手动验证"
     ]
   },
@@ -30,7 +29,7 @@ curl -fsSL \
   "required_pull_request_reviews": {
     "dismissal_restrictions": {},
     "dismiss_stale_reviews": true,
-    "require_code_owner_reviews": false,
+    "require_code_owner_reviews": true,
     "require_last_push_approval": true,
     "required_approving_review_count": 2,
     "bypass_pull_request_allowances": {
