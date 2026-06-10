@@ -17,6 +17,9 @@
 #include "recompute_wu_fwd_cube.h"
 #include "recompute_wu_fwd_vector.h"
 
+template <class... Dims>
+using GemmCubeTileShape = tla::Shape<Dims...>;
+using namespace tla;
 
 using namespace AscendC;
 __global__ __aicore__ void recompute_wu_fwd(GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR A, GM_ADDR g, GM_ADDR gk,
@@ -28,8 +31,39 @@ __global__ __aicore__ void recompute_wu_fwd(GM_ADDR k, GM_ADDR v, GM_ADDR beta, 
     if (TILING_KEY_IS(1)) {
         KERNEL_TASK_TYPE(1, KERNEL_TYPE_MIX_AIC_1_2);
         if ASCEND_IS_AIC {
-            RecomputeWUFwdProcess<DTYPE_K, DTYPE_BETA>recomputeWUFwdProcess(
+            RecomputeWUFwdProcess<DTYPE_K, DTYPE_BETA,
+                                  GemmCubeTileShape<_128, _128, _256>,
+                                  GemmCubeTileShape<_128, _128, _128>>
+                recomputeWUFwdProcess(
                 k, v, beta, A, g, cu_seqlens, chunk_indices, w, u, workspace);
+           recomputeWUFwdProcess.Init(tilingData);
+           recomputeWUFwdProcess.Process();
+        }
+        if ASCEND_IS_AIV {
+            AscendC::TPipe tPipe;
+            RecomputeWUFwdVectorProcess<DTYPE_K, DTYPE_BETA>recomputeWUFwdVectorProcess(
+                k, v, beta, A, g, cu_seqlens, chunk_indices, w, u, workspace);
+           recomputeWUFwdVectorProcess.Init(tilingData, &tPipe);
+           recomputeWUFwdVectorProcess.Process();
+        }
+    } else if (TILING_KEY_IS(2)) {
+        KERNEL_TASK_TYPE(2, KERNEL_TYPE_MIX_AIC_1_2);
+        if ASCEND_IS_AIC {
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+            // 950: 用参考算子同款 N=128 tile，V=256 由 cube.h 的 tileN 循环拆成 2 次 N=128
+            RecomputeWUFwdProcess<DTYPE_K, DTYPE_BETA,
+                                  GemmCubeTileShape<_128, _128, _256>,
+                                  GemmCubeTileShape<_128, _128, _128>>
+                recomputeWUFwdProcess(
+                k, v, beta, A, g, cu_seqlens, chunk_indices, w, u, workspace);
+#else
+            // 910B: 已验证的单次 N=256 tile
+            RecomputeWUFwdProcess<DTYPE_K, DTYPE_BETA,
+                                  GemmCubeTileShape<_128, _256, _256>,
+                                  GemmCubeTileShape<_128, _256, _64>>
+                recomputeWUFwdProcess(
+                k, v, beta, A, g, cu_seqlens, chunk_indices, w, u, workspace);
+#endif
            recomputeWUFwdProcess.Init(tilingData);
            recomputeWUFwdProcess.Process();
         }
