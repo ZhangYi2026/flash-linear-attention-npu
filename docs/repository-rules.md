@@ -17,22 +17,22 @@
 
 ## 合入检视
 
-PR 合入前需要 2 个仓库 Admin 权限账号在当前 head commit 上检视通过。`仓库规则` workflow 会动态读取 review 作者在本仓库的权限，只有 `admin` 权限的账号会计入普通检视，并排除 PR 提交人自己的审批。审批未满足时该状态保持 `pending`，审批满足后变为 `success`，避免 PR Checks 历史中留下“审批未完成”的红色失败记录。
+PR 合入前仍需要 2 个 approval。该要求由 GitHub 分支保护原生能力处理，不再设置自定义检视 status。仓库管理员应在分支保护中配置 required approvals 为 `2`，并保留 stale review dismiss 和 last push approval。
 
-`.github/CODEOWNERS` 仅用于 GitHub 自动请求默认检视人，不作为普通检视门禁的最终权限来源。仓库管理员应将 `仓库规则 / 维护者检视门禁` commit status 配置为 `main` 分支必需状态检查。
+`.github/CODEOWNERS` 用于 GitHub 原生 Code Owners review。全仓默认请求维护账号检视，ABI 敏感路径会在 `CODEOWNERS` 末尾覆盖为仅 `@weinachuan`。
 
-## ABI 兼容性门禁
+## ABI 兼容性
 
-如果 PR 修改了算子 `def`、`aclnn` 接口入参类型、返回值、必选/可选属性，或修改了 `torch` 接口入参类型等可能导致 ABI 不一致的内容，除普通 2 人检视外，还必须由 `weinachuan` 在当前 head commit 上检视通过。
+如果 PR 修改了算子 `def`、`aclnn` 接口入参类型、返回值、必选/可选属性，或修改了 `torch` 接口入参类型等可能导致 ABI 不一致的内容，仍必须由 `weinachuan` 检视确认。该要求通过 GitHub 原生 Code Owners review 生效，不再由自定义检视 workflow 自动阻塞。
 
-`仓库规则 / 维护者检视门禁` 会检查以下 ABI 风险区域：
+需要重点关注的 ABI 风险区域：
 
 - `fla/ops/**/op_host/*_def.cpp` 中的 `Input` / `Output` / `Attr` / dtype / format / required / optional 等定义
 - `fla/ops/**/op_host/op_api/aclnn_*.h` 和 `aclnn_*.cpp` 中的 aclnn 接口签名、入参类型和返回相关声明
 - `torch_custom/fla_npu/npu_custom.yaml` 等 torch schema 文件中的 `func` 定义
 - `torch_custom/fla_npu/op_plugin/ops/opapi/**` 中的 torch 适配接口签名
 
-如果 PR push 了新 commit，`weinachuan` 的审批也必须重新落在新的 head commit 上。
+如果 PR push 了新 commit，相关 ABI 检视也应重新确认。
 
 ## NPU CI 门禁
 
@@ -64,4 +64,4 @@ NPU CI 的 self-hosted runner、Docker 镜像、`--privileged`、触发方式和
 GITHUB_TOKEN=<admin-token> scripts/github/apply_branch_protection.sh main
 ```
 
-该 token 需要具备仓库 administration 写权限。脚本会要求 `仓库规则 / 维护者检视门禁` 与 `NPU CI / 手动验证` 通过，并配置 2 个 approval、stale review dismiss、Admin 也必须遵守分支保护，以及仅 `weinachuan` 具备 bypass。
+该 token 需要具备仓库 administration 写权限。脚本会要求 `NPU CI / 手动验证` 通过，并配置 2 个 approval、Code Owners review、stale review dismiss、Admin 也必须遵守分支保护，以及仅 `weinachuan` 具备 bypass。
