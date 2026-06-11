@@ -16,7 +16,8 @@
 #ifndef PREPARE_WY_REPR_BWD_DA_CUBE_H
 #define PREPARE_WY_REPR_BWD_DA_CUBE_H
 
-#define CATLASS_ARCH 2201
+#define CATLASS_ARCH 3510
+#include "prepare_wy_repr_bwd_da_tiling_data_apt.h"
 #include "prepare_wy_repr_bwd_da_common.h"
 #include "catlass/arch/arch.hpp"
 #include "catlass/catlass.hpp"
@@ -30,7 +31,8 @@
 #include "tla/layout.hpp"
 #include "tla/tensor.hpp"
 #include "catlass/arch/cross_core_sync.hpp"
-
+#include "kernel_utils/block/block_mmad_pingpong_tla.hpp"
+#include "kernel_utils/tile/copy_l0c_to_ub.hpp"
 
 using namespace Catlass;
 using namespace tla;
@@ -120,6 +122,8 @@ public:
         uint64_t V = 128;
         uint64_t BT = 64;
         uint64_t stage = 2;
+        uint64_t da6VecRow = 0;
+        uint64_t da6CVNum = 0;
 
         // Methods
         CATLASS_DEVICE
@@ -139,7 +143,8 @@ public:
                GM_ADDR ptrDA5T_, LayoutDA5T layoutDA5T_,
                GM_ADDR ptrDA6_, LayoutDA6 layoutDA6_,
                GM_ADDR ptrCuSeqLens_, GM_ADDR ptrChunkIndices_, uint64_t chunkNum_,
-               uint64_t B_, uint64_t T_, uint64_t H_, uint64_t K_, uint64_t V_, uint64_t BT_, uint64_t stage_)
+               uint64_t B_, uint64_t T_, uint64_t H_, uint64_t K_, uint64_t V_, uint64_t BT_, uint64_t stage_,
+               uint64_t da6VecRow_, uint64_t da6CVNum_)
             : ptrDw(ptrDw_),
               layoutDw(layoutDw_),
               ptrKbg(ptrKbg_),
@@ -173,7 +178,9 @@ public:
               K(K_),
               V(V_),
               BT(BT_),
-              stage(stage_) {}
+              stage(stage_),
+              da6VecRow(da6VecRow_),
+              da6CVNum(da6CVNum_) {}
     };
 
     // Methods
@@ -309,8 +316,19 @@ public:
             }
         }
         AscendC::SyncAll<false>();
-        {   // 计算第四个矩阵乘 dA_6 = A.T @ dA_5
+        {   // 计算第四个矩阵乘 dA_6 = A.T @ dA_5  (Cube-Vector sync, following dkb pattern)
             BlockMmadDA6 blockMmadDA6(resource);
+            AscendC::GlobalTensor<ElementDA5T> gmDA5T;
+            AscendC::GlobalTensor<ElementA> gmA;
+
+            uint32_t ubOffset = 0;
+            uint32_t ubListId = 0;
+            AscendC::LocalTensor<ElementDA6> ubDA6List[MAX_CUBE_VEC_SYNC_NUM];
+            for (uint32_t i = 0; i < params.da6CVNum; i++) {
+                ubDA6List[i] = resource.ubBuf.template GetBufferByByte<ElementDA6>(ubOffset);
+                ubOffset += params.da6VecRow * params.BT * sizeof(ElementDA6);
+            }
+            uint8_t beginSubBlockIdx = 1;
             for (uint32_t loopIdx = coreIdx; loopIdx < coreLoops; loopIdx += AscendC::GetBlockNum()) {
                 GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.H, params.T,
                                params.BT, loopIdx, bos, eos);
@@ -319,17 +337,12 @@ public:
                 GemmCoord actualBlockShape{curChunkSize, curChunkSize, curChunkSize};
                 for (int h = 0; h < params.H; h++) {
                     // Represent the full gm
-                    AscendC::GlobalTensor<ElementDA5T> gmDA5T;
                     gmDA5T.SetGlobalBuffer((__gm__ ElementDA5T *)params.ptrDA5T + (h * params.T + bos) * params.BT);
-                    AscendC::GlobalTensor<ElementA> gmA;
                     gmA.SetGlobalBuffer((__gm__ ElementA *)params.ptrA + (h * params.T + bos) * params.BT);
-                    AscendC::GlobalTensor<ElementDA6> gmDA6;
-                    gmDA6.SetGlobalBuffer((__gm__ ElementDA6 *)params.ptrDA6 + (h * params.T + bos) * params.BT);
 
                     // Represent the full tensors
                     auto tensorDA5T = tla::MakeTensor(gmDA5T, params.layoutDA5T, Arch::PositionGM{});
                     auto tensorA = tla::MakeTensor(gmA, params.layoutA, Arch::PositionGM{});
-                    auto tensorDA6 = tla::MakeTensor(gmDA6, params.layoutDA6, Arch::PositionGM{});
 
                     // Make tiled views
                     auto tensorBlockDA5T = GetTile(tensorDA5T,
@@ -338,13 +351,25 @@ public:
                     auto tensorBlockA = GetTile(tensorA,
                                                 tla::MakeCoord(0, 0),
                                                 tla::MakeShape(actualBlockShape.k(), actualBlockShape.n()));
-                    auto tensorBlockDA6 = GetTile(tensorDA6,
-                                                tla::MakeCoord(0, 0),
+
+                    using UBTensor = tla::Tensor<AscendC::LocalTensor<ElementDA6>, LayoutDA6, tuple<int, int>, AscendC::TPosition::VECCALC>;
+                    UBTensor tensorBlockDA6List[MAX_CUBE_VEC_SYNC_NUM];
+                    for (uint32_t i = 0; i < params.da6CVNum; i++) {
+                        auto tensorDA6 = tla::MakeTensor(ubDA6List[i], params.layoutDA6, Arch::PositionUB{});
+                        tensorBlockDA6List[i] = GetTile(tensorDA6, tla::MakeCoord(0, 0),
                                                 tla::MakeShape(actualBlockShape.m(), actualBlockShape.n()));
-                    // Compute block-scoped matrix multiply-add
-                    blockMmadDA6(tensorBlockDA5T, tensorBlockA, tensorBlockDA6, actualBlockShape);
-                    Arch::CrossCoreSetFlagWithReverse<0x2, PIPE_FIX>(flagAicFinishStore);
+                    }
+
+                    // Compute block-scoped matrix multiply-add with Cube-Vector sync
+                    blockMmadDA6(tensorBlockDA5T, tensorBlockA, tensorBlockDA6List, actualBlockShape, params.da6VecRow,
+                        beginSubBlockIdx, SYNC_AIV_AIC_FLAG_BEGIN, SYNC_AIC_AIV_FLAG_BEGIN, ubListId, 2, params.da6CVNum);
+                    beginSubBlockIdx += CeilDiv(curChunkSize, params.da6VecRow);
+                    beginSubBlockIdx = beginSubBlockIdx % 2;
                 }
+            }
+            for (uint32_t i = 0; i < params.da6CVNum; i++) {
+                AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(SYNC_AIV_AIC_FLAG_BEGIN + i);
+                AscendC::CrossCoreWaitFlag<0x4, PIPE_FIX>(SYNC_AIV_AIC_FLAG_BEGIN + FLAG_ID_MAX + i);
             }
         }
     }
@@ -360,7 +385,7 @@ public:
                                                 GM_ADDR du_, GM_ADDR g_, GM_ADDR cu_seqlens_, GM_ADDR chunk_indices_,
                                                 GM_ADDR dA_, GM_ADDR workspace_);
     __aicore__ inline void Process();
-    __aicore__ inline void Init(const PrepareWyReprBwdDaTilingData &tiling);
+    __aicore__ inline void Init(const PrepareWyReprBwdDaTilingDataA5 &tiling);
 private:
     uint64_t B = 0;
     uint64_t T = 0;
@@ -380,6 +405,8 @@ private:
     GM_ADDR chunk_indices;
     GM_ADDR dA;
     GM_ADDR workspace;
+    uint64_t da6VecRow = 0;
+    uint64_t da6CVNum = 0;
 };
 
 template <typename kType, typename betaType>
@@ -410,7 +437,7 @@ __aicore__ inline PrepareWyReprBwdDAProcess<kType, betaType>::PrepareWyReprBwdDA
 };
 
 template <typename kType, typename betaType>
-__aicore__ void inline PrepareWyReprBwdDAProcess<kType, betaType>::Init(const PrepareWyReprBwdDaTilingData &tiling) {
+__aicore__ void inline PrepareWyReprBwdDAProcess<kType, betaType>::Init(const PrepareWyReprBwdDaTilingDataA5 &tiling) {
     B = tiling.B;
     T = tiling.T;
     H = tiling.H;
@@ -418,6 +445,8 @@ __aicore__ void inline PrepareWyReprBwdDAProcess<kType, betaType>::Init(const Pr
     V = tiling.V;
     BT = tiling.chunkSize;
     chunkNum = tiling.chunkNum;
+    da6VecRow = tiling.rowNumG;
+    da6CVNum = tiling.gCVNum;
     return;
 }
 
@@ -452,33 +481,33 @@ __aicore__ void inline PrepareWyReprBwdDAProcess<kType, betaType>::Process() {
     using LayoutTagDA6 = layout::RowMajor;
     LayoutTagDA6 tagDA6 = LayoutTagDA6::MakeLayout<kType>(BT, BT);
 
-    using ArchTag = Arch::AtlasA2;
-    using DispatchPolicy = Gemm::MmadPingpong<ArchTag, true, false>;
+    using ArchTag = Arch::Ascend950;
+    using DispatchPolicy = Common::MmadPingpong<ArchTag, false, false, 2>;
     using L1TileShape = Shape<_128, _128, _256>;
     using L0TileShape = Shape<_128, _128, _128>;
 
     // 计算第一个矩阵乘 dA_1 = dw @ kbg.T
     using TileCopyDA1 =
-        Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDw, kType, LayoutTagKbg, kType, LayoutTagDA1>;
-    using BlockMmadDA1 = Gemm::Block::BlockMmadTla<
+        Common::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDw, kType, LayoutTagKbg, kType, LayoutTagDA1>;
+    using BlockMmadDA1 = Common::BlockMmadTla<
         DispatchPolicy, L1TileShape, L0TileShape, kType, kType, kType, void, TileCopyDA1>;
 
     // 计算第二个矩阵乘 dA_2 = du @ vb.T
     using TileCopyDA2 =
-        Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDu, kType, LayoutTagVb, kType, LayoutTagDA2>;
-    using BlockMmadDA2 = Gemm::Block::BlockMmadTla<
+        Common::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDu, kType, LayoutTagVb, kType, LayoutTagDA2>;
+    using BlockMmadDA2 = Common::BlockMmadTla<
         DispatchPolicy, L1TileShape, L0TileShape, kType, kType, kType, void, TileCopyDA2>;
 
     // 计算第三个矩阵乘 dA_5 = dA_4 @ A.T
     using TileCopyDA5 =
-        Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDA4, kType, LayoutTagAT, kType, LayoutTagDA5>;
-    using BlockMmadDA5 = Gemm::Block::BlockMmadTla<
+        Common::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDA4, kType, LayoutTagAT, kType, LayoutTagDA5>;
+    using BlockMmadDA5 = Common::BlockMmadTla<
         DispatchPolicy, L1TileShape, L0TileShape, kType, kType, kType, void, TileCopyDA5>;
 
-    // 计算第四个矩阵乘 dA_6 = A.T @ dA_5
+    // 计算第四个矩阵乘 dA_6 = A.T @ dA_5 (Cube-Vector sync, output to UB)
     using TileCopyDA6 =
-        Gemm::Tile::PackedTileCopyTla<ArchTag, kType, LayoutTagDA5T, kType, LayoutTagA, kType, LayoutTagDA6>;
-    using BlockMmadDA6 = Gemm::Block::BlockMmadTla<
+        Common::Tile::PackedTileCopyTlaToUB<ArchTag, kType, LayoutTagDA5T, kType, LayoutTagA, kType, LayoutTagDA6, void, Gemm::Tile::CopyL0CToUBMode::NO_SPLIT>;
+    using BlockMmadDA6 = Common::BlockMmadTla<
         DispatchPolicy, L1TileShape, L0TileShape, kType, kType, kType, void, TileCopyDA6>;
 
     auto layoutDw = MakeLayoutFromTag(tagDw);
@@ -526,7 +555,8 @@ __aicore__ void inline PrepareWyReprBwdDAProcess<kType, betaType>::Process() {
         cu_seqlens,
         chunk_indices,
         chunkNum,
-        B, T, H, K, V, BT, 4};
+        B, T, H, K, V, BT, 4,
+        da6VecRow, da6CVNum};
 
     kernel(param);
 }
