@@ -11,14 +11,11 @@
 # -----------------------------------------------------------------------------------------------------------
 
 import torch
-import torch_npu
 import ascend_ops
 import pytest
 import math
 import random
 from typing import Optional
-
-torch_npu.npu.set_device(7)
 
 def prepare_lens(cu_seqlens: torch.LongTensor) -> torch.LongTensor:
     return cu_seqlens[1:] - cu_seqlens[:-1]
