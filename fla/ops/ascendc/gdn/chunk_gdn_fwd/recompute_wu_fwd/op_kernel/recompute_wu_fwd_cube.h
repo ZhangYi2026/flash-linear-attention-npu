@@ -15,6 +15,11 @@
 
 #ifndef RECOMPUTE_WU_FWD_CUBE_H
 #define RECOMPUTE_WU_FWD_CUBE_H
+
+#include "recompute_wu_fwd_struct.h"
+
+using GDN::RecomputeWUFwdTilingData;
+
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
 #define CATLASS_ARCH 3510
 #else

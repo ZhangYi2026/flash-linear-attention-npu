@@ -36,7 +36,9 @@ set(INCLUDE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}/../..
     ${CMAKE_CURRENT_SOURCE_DIR}/../../common/include
     ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/common
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/chunk_gdn_fwd
     ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/chunk_gdn_fwd/chunk_fwd_o/op_kernel
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../fla/ops/ascendc/gdn/chunk_gdn_fwd/recompute_wu_fwd/op_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/catlass/include
 )
 
