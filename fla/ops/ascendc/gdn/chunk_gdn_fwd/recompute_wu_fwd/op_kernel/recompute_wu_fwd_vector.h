@@ -16,8 +16,11 @@
 #ifndef RECOMPUTE_WU_FWD_VECTOR_H
 #define RECOMPUTE_WU_FWD_VECTOR_H
 
+#include "recompute_wu_fwd_struct.h"
 #include "catlass/arch/cross_core_sync.hpp"
 using namespace AscendC;
+
+using GDN::RecomputeWUFwdTilingData;
 
 template <typename kType, typename betaType>
 class RecomputeWUFwdVectorProcess {
