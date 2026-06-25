@@ -207,35 +207,44 @@ print(dA.shape)
 
 ```text
 prepare_wy_repr_bwd_da/
-├── examples/
-│   └── test_aclnn_prepare_wy_repr_bwd_da.cpp
-├── op_host/
-│   ├── op_api/
-│   │   ├── aclnn_prepare_wy_repr_bwd_da.cpp
-│   │   ├── aclnn_prepare_wy_repr_bwd_da.h
-│   │   ├── prepare_wy_repr_bwd_da.cpp
-│   │   └── prepare_wy_repr_bwd_da.h
-│   ├── op_tiling/
-│   │   ├── prepare_wy_repr_bwd_da_tiling.cpp
-│   │   └── prepare_wy_repr_bwd_da_tiling.h
-│   ├── CMakeLists.txt
-│   └── prepare_wy_repr_bwd_da_def.cpp
-├── op_kernel/
-│   ├── prepare_wy_repr_bwd_da_common.h
-│   ├── prepare_wy_repr_bwd_da_cube.h
-│   ├── prepare_wy_repr_bwd_da_vector.h
-│   └── prepare_wy_repr_bwd_da.cpp
-├── test/
-│   ├── test_da.py                 # 精度测试脚本
-│   ├── test_da_performance.py     # 性能测试脚本
-│   ├── test_da_cases.json         # 测试用例配置（JSON 格式）
-│   ├── gen_perf_report.py         # 性能报告生成脚本
-│   ├── run_da.sh                  # 统一启动脚本
-│   ├── perf_report.csv            # 性能报告输出（运行后生成）
-│   └── prof_output/               # msprof 采集输出目录（运行后生成）
-├── CMakeLists.txt
-├── README.md
-└── run.sh
+|-- examples/
+|   `-- test_aclnn_prepare_wy_repr_bwd_da.cpp
+|-- op_host/
+|   |-- op_api/
+|   |   |-- aclnn_prepare_wy_repr_bwd_da.cpp
+|   |   |-- aclnn_prepare_wy_repr_bwd_da.h
+|   |   |-- prepare_wy_repr_bwd_da.cpp
+|   |   `-- prepare_wy_repr_bwd_da.h
+|   |-- op_tiling/
+|   |   |-- arch35/
+|   |   |   |-- prepare_wy_repr_bwd_da_tiling_a5.cpp
+|   |   |   `-- prepare_wy_repr_bwd_da_tiling_a5.h
+|   |   |-- prepare_wy_repr_bwd_da_tiling.cpp
+|   |   `-- prepare_wy_repr_bwd_da_tiling.h
+|   |-- CMakeLists.txt
+|   |-- prepare_wy_repr_bwd_da_def.cpp
+|   `-- prepare_wy_repr_bwd_da_tiling_processor.h
+|-- op_kernel/
+|   |-- arch35/
+|   |   |-- prepare_wy_repr_bwd_da_common.h
+|   |   |-- prepare_wy_repr_bwd_da_cube.h
+|   |   |-- prepare_wy_repr_bwd_da_tiling_data_apt.h
+|   |   `-- prepare_wy_repr_bwd_da_vector.h
+|   |-- prepare_wy_repr_bwd_da_common.h
+|   |-- prepare_wy_repr_bwd_da_cube.h
+|   |-- prepare_wy_repr_bwd_da_struct.h
+|   |-- prepare_wy_repr_bwd_da_vector.h
+|   `-- prepare_wy_repr_bwd_da.cpp
+|-- test/
+|   |-- test_da.py                 # 精度测试脚本
+|   |-- test_da_performance.py     # 性能测试脚本
+|   |-- test_da_cases.json         # 测试用例配置（JSON 格式）
+|   |-- gen_perf_report.py         # 性能报告生成脚本
+|   |-- run_da.sh                  # 统一启动脚本
+|   |-- perf_report.csv            # 性能报告输出（运行后生成）
+|   `-- prof_output/               # msprof 采集输出目录（运行后生成）
+|-- CMakeLists.txt
+`-- README.md
 ```
 
 ---

@@ -457,7 +457,7 @@ __aicore__ void inline PrepareWyReprBwdDAProcess<kType, betaType>::Process() {
     LayoutTagDA6 tagDA6 = LayoutTagDA6::MakeLayout<kType>(BT, BT);
 
     using ArchTag = Arch::AtlasA2;
-    using DispatchPolicy = Gemm::MmadPingpong<ArchTag, true, false>;
+    using DispatchPolicy = Gemm::MmadPingpong<ArchTag, true>;
     using L1TileShape = Shape<_128, _128, _256>;
     using L0TileShape = Shape<_128, _128, _128>;
 
