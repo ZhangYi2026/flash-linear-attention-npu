@@ -277,6 +277,10 @@
  template <typename DataType, typename GType>
  __aicore__ inline void ChunkBwdDqkwgVectorProcess<DataType, GType>::CopyGateWithPad(
      LocalTensor<GType> &dst, GlobalTensor<GType> &src, uint64_t offset, uint32_t validLen, uint32_t totalLen) {
+     if (validLen == totalLen) {
+         DataCopy(dst, src[offset], totalLen);
+         return;
+     }
      Duplicate(dst, static_cast<GType>(0), totalLen);
      TEventID eventId = GetTPipePtr()->FetchEventID(HardEvent::V_MTE2);
      SetFlag<HardEvent::V_MTE2>(eventId);
@@ -429,7 +433,6 @@
 
      uint32_t bos = 0;
      uint32_t eos = 0;
-     uint32_t vecTaskIdx = 0;
      for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
          uint32_t bIdx = loopIdx / numChunks;
          uint32_t chunkIdx = loopIdx % numChunks;
@@ -437,6 +440,7 @@
          uint32_t actual_chunk_len = eos - bos;
          uint32_t BT_sub = actual_chunk_len;
          uint32_t dwSize_sub = BT_sub * K;
+         WaitCubeReady();
 
          // ---------- Part1: dg_last = sum(h*dh), dw = -dw (head-split) ----------
          {
@@ -444,10 +448,7 @@
              auto tensorDhFp32 = tensorHFp32[hDhSize];
              auto tensorSumFp32 = calcBuf3.Get<float>();
              for (uint32_t h = 0; h < H; h++) {
-                 WaitCubeReady();
-                 ++vecTaskIdx;
-                 if (vecTaskIdx % subBlockNum != subBlockIdx) {
-                     SetVecCredit();
+                 if (h % subBlockNum != subBlockIdx) {
                      continue;
                  }
                  uint64_t hOffset = ((bIdx * H + h) * numChunks + chunkIdx) * K * V;
@@ -543,7 +544,6 @@
                      PipeBarrier<PIPE_MTE3>();
                      outQue2.FreeTensor(tensorDwOut);
                  }
-                 SetVecCredit();
              }
          }
 
@@ -648,6 +648,8 @@
                  }
              }
          }
+         PipeBarrier<PIPE_MTE3>();
+         SetVecCredit();
      }
  }
 
@@ -674,17 +676,14 @@
 
      uint32_t bos = 0;
      uint32_t eos = 0;
-     uint32_t vecTaskIdx = 0;
      for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
          GetChunkOffset(ptrCuSeqLen, ptrChunkIndices, B, H, T, BT, loopIdx, bos, eos);
          uint32_t real_BT = eos - bos;
          uint32_t dsSize_sub = real_BT * BT;
+         WaitCubeReady();
 
          for (uint32_t h = 0; h < H; h++) {
-             WaitCubeReady();
-             ++vecTaskIdx;
-             if (vecTaskIdx % subBlockNum != subBlockIdx) {
-                 SetVecCredit();
+             if (h % subBlockNum != subBlockIdx) {
                  continue;
              }
              uint64_t gOffset = (h * T + bos);
@@ -794,8 +793,9 @@
                  outQue2.FreeTensor(tensorDgOut);
              }
              PipeBarrier<PIPE_MTE3>();
-             SetVecCredit();
          }
+         PipeBarrier<PIPE_MTE3>();
+         SetVecCredit();
      }
  }
 
@@ -830,18 +830,15 @@
 
      uint32_t bos = 0;
      uint32_t eos = 0;
-     uint32_t vecTaskIdx = 0;
      for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
          GetChunkOffset(ptrCuSeqLen, ptrChunkIndices, B, H, T, BT, loopIdx, bos, eos);
          uint32_t actual_chunk_len = eos - bos;
          uint32_t real_BT = actual_chunk_len;
          uint32_t dqSize_sub = actual_chunk_len * K;
+         WaitCubeReady();
 
          for (uint32_t h = 0; h < H; h++) {
-             WaitCubeReady();
-             ++vecTaskIdx;
-             if (vecTaskIdx % subBlockNum != subBlockIdx) {
-                 SetVecCredit();
+             if (h % subBlockNum != subBlockIdx) {
                  continue;
              }
              uint64_t qkOffset = (h * T + bos) * K;
@@ -958,8 +955,9 @@
                  }
              }
              PipeBarrier<PIPE_MTE3>();
-             SetVecCredit();
          }
+         PipeBarrier<PIPE_MTE3>();
+         SetVecCredit();
      }
  }
 
@@ -999,7 +997,6 @@
 
      uint32_t bos = 0;
      uint32_t eos = 0;
-     uint32_t vecTaskIdx = 0;
      for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
          GetChunkOffset(ptrCuSeqLen, ptrChunkIndices, B, H, T, BT, loopIdx, bos, eos);
          uint32_t actual_chunk_len = eos - bos;
@@ -1008,12 +1005,10 @@
          dkSize = actual_chunk_len * K;
          uint32_t bIdx = loopIdx / numChunks;
          uint32_t chunkIdx = loopIdx % numChunks;
+         WaitCubeReady();
 
          for (uint32_t h = 0; h < H; h++) {
-             WaitCubeReady();
-             ++vecTaskIdx;
-             if (vecTaskIdx % subBlockNum != subBlockIdx) {
-                 SetVecCredit();
+             if (h % subBlockNum != subBlockIdx) {
                  continue;
              }
              uint64_t kOffset = (h * T + bos) * K;
@@ -1187,8 +1182,9 @@
                  }
              }
              PipeBarrier<PIPE_MTE3>();
-             SetVecCredit();
          }
+         PipeBarrier<PIPE_MTE3>();
+         SetVecCredit();
      }
  }
 

@@ -353,7 +353,7 @@ namespace Catlass::Gemm::Kernel {
          *
          * 每核任务流: A(c0..cM-1), B(c0..cM-1), C(c0..cM-1), D(c0..cM-1) (L = 4*M), 跨 stage 连续。
          * 每个 (stage, chunk) task: 先 WaitCredit (节流, cube 领先 vector <=N 个 task),
-         * 每个 head 数据 ready 后 SetCubeReady 一次。vector 预置 N=min(groupSize, M) 个信用。
+         * chunk 内全部 head 数据 ready 后 SetCubeReady 一次。vector 预置 N=min(groupSize, M) 个信用。
          * N<=M 保证 C_cube/D_cube 读 B_vector 产出的 ds_temp 时其已就绪。
          */
         template <>
@@ -402,9 +402,9 @@ namespace Catlass::Gemm::Kernel {
                         static_cast<uint32_t>(params.K),
                         static_cast<uint32_t>(params.V)
                     };
+                    WaitCredit();
                     BlockMmadPart1 blockMmadPart1(resource);
                     for (uint32_t h = 0; h < params.H; h++) {
-                        WaitCredit();  // one credit per in-flight head
                         uint64_t dvOffset = (h * params.T + bos) * params.V;
                         uint64_t hOffset = ((bIdx * params.H + h) * params.numChunks + chunkIdx) * params.K * params.V;
                         // dw 写组对齐环形槽 (常驻 L2): 偏移由 (coreIdx,loopBase,loopIdx,coreNum,h) 算出
@@ -431,8 +431,11 @@ namespace Catlass::Gemm::Kernel {
 
                         blockMmadPart1(tensorBlockDv, tensorBlockH, tensorBlockDw, actualBlockShape);
                         AscendC::PipeBarrier<PIPE_FIX>();
-                        SetCubeReady();
                     }
+                    // A_vector consumes only dw. mm5 is consumed later by B_vector,
+                    // after the cube stream has finished all A tasks.
+                    AscendC::PipeBarrier<PIPE_FIX>();
+                    SetCubeReady();
                 }
                 // --- Part2: mm5 = q @ k^T -> wsMm5 (B_vector 在后续 stage 消费) ---
                 {
@@ -470,6 +473,7 @@ namespace Catlass::Gemm::Kernel {
                         AscendC::PipeBarrier<PIPE_FIX>();
                     }
                 }
+                AscendC::PipeBarrier<PIPE_FIX>();
                 }
 
             // ========== B_cube: ds = do @ v^T -> wsDsTemp ==========
@@ -486,8 +490,8 @@ namespace Catlass::Gemm::Kernel {
                     static_cast<uint32_t>(params.V)
                 };
                 BlockMmadPart3 blockMmadPart3(resource);
+                WaitCredit();
                 for (uint32_t h = 0; h < params.H; h++) {
-                    WaitCredit();  // one credit per in-flight head
                     uint64_t dvOffset = (h * params.T + bos) * params.V;
                     uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
                                                                params.H, params.BT,
@@ -513,8 +517,9 @@ namespace Catlass::Gemm::Kernel {
 
                     blockMmadPart3(tensorBlockDo, tensorBlockV, tensorBlockDs, actualBlockShape);
                     AscendC::PipeBarrier<PIPE_FIX>();
-                    SetCubeReady();
                 }
+                AscendC::PipeBarrier<PIPE_FIX>();
+                SetCubeReady();
             }
 
             // ========== C_cube: dq_inner = do @ h^T -> ptrDq, 然后 mm6 = ds_temp @ k -> wsMm6 ==========
@@ -526,8 +531,8 @@ namespace Catlass::Gemm::Kernel {
                 uint32_t bIdx = loopIdx / params.numChunks;
                 uint32_t chunkIdx = loopIdx % params.numChunks;
 
+                WaitCredit();
                 for (uint32_t h = 0; h < params.H; h++) {
-                    WaitCredit();  // one credit per in-flight head
                     // --- Part4: dq_inner = do @ h^T -> ptrDq ---
                     {
                         GemmCoord actualBlockShape{
@@ -596,8 +601,9 @@ namespace Catlass::Gemm::Kernel {
                         blockMmadPart6(tensorBlockDsTemp, tensorBlockK, tensorBlockMm6, actualBlockShape);
                         AscendC::PipeBarrier<PIPE_FIX>();
                     }
-                    SetCubeReady();
                 }
+                AscendC::PipeBarrier<PIPE_FIX>();
+                SetCubeReady();
             }
 
             // ========== D_cube: dk_inner = v @ dh -> ptrDk, 然后 mm7 = ds_temp^T @ q -> wsMm7 ==========
@@ -608,8 +614,8 @@ namespace Catlass::Gemm::Kernel {
                 uint32_t bIdx = loopIdx / params.numChunks;
                 uint32_t chunkIdx = loopIdx % params.numChunks;
 
+                WaitCredit();
                 for (uint32_t h = 0; h < params.H; h++) {
-                    WaitCredit();  // one credit per in-flight head
                     // --- Part5: dk_inner = v @ dh -> ptrDk ---
                     {
                         GemmCoord actualBlockShape{
@@ -678,8 +684,9 @@ namespace Catlass::Gemm::Kernel {
                         blockMmadPart7(tensorBlockDsTemp, tensorBlockQ, tensorBlockMm7, actualBlockShape);
                         AscendC::PipeBarrier<PIPE_FIX>();
                     }
-                    SetCubeReady();
                 }
+                AscendC::PipeBarrier<PIPE_FIX>();
+                SetCubeReady();
             }
                 loopBase = loopEnd;
             }  // while group (chunk-group-major)
