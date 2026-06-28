@@ -385,12 +385,6 @@ namespace Catlass::Gemm::Kernel {
             // cube WaitCredit 总次数 == L (==4M); 与 vector 端预置 N + SetCredit L 对应, 末尾余 N 信用 (无害)。
             // 现按 chunk-group-major 组织: 外层按 G 个 chunk 一组, 组内 A->B->C->D 连着做 (组的输入在 L2 内复用)。
 
-            // per-head ready: 仅对大 HV 且 per-head 负载重 (BT=128 或 V=256) 的劣化形状, 把 cube->vector 的 ready
-            // 由 per-chunk 改回 per-head — 恢复 chunk 内 head 级流水重叠 (vector 拿到 head[h] 即可开工, 不必等 cube
-            // 跑完整 chunk 全部 HV 个 head)。这正是 d3d3557f 改 per-chunk 后这些 case 相对 main 全局工作区 (深流水)
-            // 丢掉的重叠。credit (throttle) 仍 per-chunk 不变。判据 cube/vector 同式 => ready flag 计数恒等 (cube 每 chunk
-            // 发 HV 个, 两个 AIV sub-block 各等 HV 个, 0x2 聚合), 与 per-chunk(各 1 个) 同构, 不会死锁。其它形状字节不变。
-            const bool perHeadReady = (params.HV >= 32) && (params.BT == 128 || params.V == 256);
             uint32_t loopBase = coreIdx;
             while (loopBase < coreLoops) {
                 uint32_t loopEnd = DqkwgGroupEnd(loopBase, coreLoops, coreNum,
@@ -440,14 +434,11 @@ namespace Catlass::Gemm::Kernel {
 
                         blockMmadPart1(tensorBlockDv, tensorBlockH, tensorBlockDw, actualBlockShape);
                         AscendC::PipeBarrier<PIPE_FIX>();
-                        if (perHeadReady) { SetCubeReady(); }  // 本 head 的 dw 已写回 GM, 立刻通知 vector
                     }
                     // A_vector consumes only dw. mm5 is consumed later by B_vector,
                     // after the cube stream has finished all A tasks.
-                    if (!perHeadReady) {
-                        AscendC::PipeBarrier<PIPE_FIX>();
-                        SetCubeReady();
-                    }
+                    AscendC::PipeBarrier<PIPE_FIX>();
+                    SetCubeReady();
                 }
                 // --- Part2: mm5 = q @ k^T -> wsMm5 (B_vector 在后续 stage 消费) ---
                 {
@@ -532,12 +523,9 @@ namespace Catlass::Gemm::Kernel {
 
                     blockMmadPart3(tensorBlockDo, tensorBlockV, tensorBlockDs, actualBlockShape);
                     AscendC::PipeBarrier<PIPE_FIX>();
-                    if (perHeadReady) { SetCubeReady(); }  // 本 head 的 ds 已写回, 立刻通知 vector
                 }
-                if (!perHeadReady) {
-                    AscendC::PipeBarrier<PIPE_FIX>();
-                    SetCubeReady();
-                }
+                AscendC::PipeBarrier<PIPE_FIX>();
+                SetCubeReady();
             }
 
             // ========== C_cube: dq_inner = do @ h^T -> ptrDq, 然后 mm6 = ds_temp @ k -> wsMm6 ==========
@@ -623,12 +611,9 @@ namespace Catlass::Gemm::Kernel {
                         blockMmadPart6(tensorBlockDsTemp, tensorBlockK, tensorBlockMm6, actualBlockShape);
                         AscendC::PipeBarrier<PIPE_FIX>();
                     }
-                    if (perHeadReady) { SetCubeReady(); }  // 本 head 的 dq_inner+mm6 已写回, 立刻通知 vector
                 }
-                if (!perHeadReady) {
-                    AscendC::PipeBarrier<PIPE_FIX>();
-                    SetCubeReady();
-                }
+                AscendC::PipeBarrier<PIPE_FIX>();
+                SetCubeReady();
             }
 
             // ========== D_cube: dk_inner = v @ dh -> ptrDk, 然后 mm7 = ds_temp^T @ q -> wsMm7 ==========
@@ -713,12 +698,9 @@ namespace Catlass::Gemm::Kernel {
                         blockMmadPart7(tensorBlockDsTemp, tensorBlockQ, tensorBlockMm7, actualBlockShape);
                         AscendC::PipeBarrier<PIPE_FIX>();
                     }
-                    if (perHeadReady) { SetCubeReady(); }  // 本 head 的 dk_inner+mm7 已写回, 立刻通知 vector
                 }
-                if (!perHeadReady) {
-                    AscendC::PipeBarrier<PIPE_FIX>();
-                    SetCubeReady();
-                }
+                AscendC::PipeBarrier<PIPE_FIX>();
+                SetCubeReady();
             }
                 loopBase = loopEnd;
             }  // while group (chunk-group-major)

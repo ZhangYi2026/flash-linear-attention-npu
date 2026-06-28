@@ -444,11 +444,7 @@
          uint32_t actual_chunk_len = eos - bos;
          uint32_t BT_sub = actual_chunk_len;
          uint32_t dwSize_sub = BT_sub * K;
-         // per-head ready (与 cube 同式): 大 HV + 重 per-head 负载 (BT=128 / V=256) 时, 改 per-head 等待 ->
-         // 拿到 head[h] 的 dw 即可开工, 恢复 chunk 内 head 流水重叠。两个 sub-block 各等 HV 次 (放在 continue 之前),
-         // 与 cube 每 chunk 发 HV 次对齐。其它形状走 per-chunk (字节不变)。
-         const bool perHeadReady = (HV >= 32) && (BT == 128 || V == 256);
-         if (!perHeadReady) { WaitCubeReady(); }
+         WaitCubeReady();
 
          // ---------- Part1: dg_last = sum(h*dh), dw = -dw (head-split) ----------
          {
@@ -456,7 +452,6 @@
              auto tensorDhFp32 = tensorHFp32[hDhSize];
              auto tensorSumFp32 = calcBuf3.Get<float>();
              for (uint32_t h = 0; h < HV; h++) {
-                 if (perHeadReady) { WaitCubeReady(); }  // 等 cube 本 head 的 dw
                  if (h % subBlockNum != subBlockIdx) {
                      continue;
                  }
@@ -691,11 +686,9 @@
          GetChunkOffset(ptrCuSeqLen, ptrChunkIndices, B, HV, T, BT, loopIdx, bos, eos);
          uint32_t real_BT = eos - bos;
          uint32_t dsSize_sub = real_BT * BT;
-         const bool perHeadReady = (HV >= 32) && (BT == 128 || V == 256);
-         if (!perHeadReady) { WaitCubeReady(); }
+         WaitCubeReady();
 
          for (uint32_t h = 0; h < HV; h++) {
-             if (perHeadReady) { WaitCubeReady(); }  // 等 cube 本 head 的 ds
              if (h % subBlockNum != subBlockIdx) {
                  continue;
              }
@@ -849,11 +842,9 @@
          uint32_t actual_chunk_len = eos - bos;
          uint32_t real_BT = actual_chunk_len;
          uint32_t dqSize_sub = actual_chunk_len * K;
-         const bool perHeadReady = (HV >= 32) && (BT == 128 || V == 256);
-         if (!perHeadReady) { WaitCubeReady(); }
+         WaitCubeReady();
 
          for (uint32_t h = 0; h < HV; h++) {
-             if (perHeadReady) { WaitCubeReady(); }  // 等 cube 本 head 的 dq_inner+mm6
              if (h % subBlockNum != subBlockIdx) {
                  continue;
              }
@@ -1031,11 +1022,9 @@
          dkSize = actual_chunk_len * K;
          uint32_t bIdx = loopIdx / numChunks;
          uint32_t chunkIdx = loopIdx % numChunks;
-         const bool perHeadReady = (HV >= 32) && (BT == 128 || V == 256);
-         if (!perHeadReady) { WaitCubeReady(); }
+         WaitCubeReady();
 
          for (uint32_t h = 0; h < HV; h++) {
-             if (perHeadReady) { WaitCubeReady(); }  // 等 cube 本 head 的 dk_inner+mm7
              if (h % subBlockNum != subBlockIdx) {
                  continue;
              }
