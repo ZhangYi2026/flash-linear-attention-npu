@@ -18,7 +18,8 @@
  #include "kernel_operator.h"
 
  constexpr uint64_t CONST_B = 1;
- constexpr uint64_t CONST_H = 4;
+ constexpr uint64_t CONST_HV = 4;
+ constexpr uint64_t CONST_HK = 4;
  constexpr uint64_t CONST_T = 2816;
  constexpr uint64_t CONST_K = 128;
  constexpr uint64_t CONST_V = 128;
@@ -61,6 +62,14 @@
  // depth in wsBtxKSyncSlotsPerHead; short depth is fixed here.
  constexpr uint32_t DqkwgShortRingDepth = 8;
 
+ // short 环深自适应: dw/mm6/mul1 的存活窗口只需 2G-1 个 slot (G=groupRingDepth/4)。固定 8 是按最大 G=4 配的,
+ // 但大 H / 大 BT 的 memory-bound case 实际 G=1~2 时, 深度 8 严重过配 -> 环装不进 L2 -> FixPipe/MTE2 疯狂 miss。
+ // 按 G 收缩到 2G-1 (地板 2, 保证 G=1 时仍有双缓冲) 可大幅减小环、贴近 L2。cube/vector/tiling 必须用同一公式。
+ __aicore__ inline uint32_t DqkwgShortRingDepthFromGroup(uint32_t groupRingDepth) {
+     uint32_t d = groupRingDepth / 2;               // = 2G (>= 2G-1 所需余量; G=4 时 =8 复现原值, G<4 时收缩)
+     return d >= 2 ? d : 2;                         // 地板 2 (G=1 仍保双缓冲)
+ }
+
  // ---- chunk-group-major: group each core's chunks and run A->B->C->D in-group ----
  // G = crossRingDepth / 4. The final group may merge a small tail, so short
  // rings must have at least 2G-1 slots for the largest supported G=4.
@@ -91,9 +100,10 @@
      return (uint64_t)coreIdx * ringDepth + slotInCore;
  }
 
- __aicore__ inline uint64_t DqkwgShortRingSlot(uint32_t coreIdx, uint32_t loopIdx, uint32_t coreNum) {
+ __aicore__ inline uint64_t DqkwgShortRingSlot(uint32_t coreIdx, uint32_t loopIdx, uint32_t coreNum,
+                                               uint32_t shortRingDepth) {
      uint32_t j = (coreNum != 0) ? ((loopIdx - coreIdx) / coreNum) : 0;
-     return (uint64_t)coreIdx * DqkwgShortRingDepth + (uint64_t)(j % DqkwgShortRingDepth);
+     return (uint64_t)coreIdx * shortRingDepth + (uint64_t)(j % shortRingDepth);
  }
 
  __aicore__ inline uint64_t DqkwgBtxKRingElemOffset(uint32_t coreIdx, uint32_t loopBase, uint32_t loopIdx,
@@ -118,14 +128,16 @@
  }
 
  __aicore__ inline uint64_t DqkwgShortBtxKRingElemOffset(uint32_t coreIdx, uint32_t loopIdx, uint32_t coreNum,
-                                                         uint32_t h, uint64_t H, uint64_t BT, uint64_t K) {
-     uint64_t slot = DqkwgShortRingSlot(coreIdx, loopIdx, coreNum);
+                                                         uint32_t h, uint64_t H, uint64_t BT, uint64_t K,
+                                                         uint32_t shortRingDepth) {
+     uint64_t slot = DqkwgShortRingSlot(coreIdx, loopIdx, coreNum, shortRingDepth);
      return (slot * H + (uint64_t)h) * (BT * K);
  }
 
  __aicore__ inline uint64_t DqkwgShortBtbRingElemOffset(uint32_t coreIdx, uint32_t loopIdx, uint32_t coreNum,
-                                                        uint32_t h, uint64_t H, uint64_t BT) {
-     uint64_t slot = DqkwgShortRingSlot(coreIdx, loopIdx, coreNum);
+                                                        uint32_t h, uint64_t H, uint64_t BT,
+                                                        uint32_t shortRingDepth) {
+     uint64_t slot = DqkwgShortRingSlot(coreIdx, loopIdx, coreNum, shortRingDepth);
      return (slot * H + (uint64_t)h) * (BT * BT);
  }
 
@@ -168,7 +180,7 @@
      static constexpr bool needsCast = true;
  };
 
- __aicore__ void inline GetChunkOffset(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, uint64_t B, uint64_t H, uint64_t T,
+ __aicore__ void inline GetChunkOffset(GM_ADDR cu_seqlens, GM_ADDR chunk_indices, uint64_t B, uint64_t HV, uint64_t T,
                                        uint64_t chunkSize, uint32_t loopIdx, uint32_t &bos, uint32_t &eos)
  {
      if (cu_seqlens == nullptr) {
@@ -177,8 +189,8 @@
          uint32_t bIdx = loopIdx / coreLoopsInB;
          bos = chunkIdx * chunkSize;
          eos = bos + chunkSize > T ? T : bos + chunkSize;
-         bos += (bIdx * H * T);
-         eos += (bIdx * H * T);
+         bos += (bIdx * HV * T);
+         eos += (bIdx * HV * T);
      } else {
          AscendC::GlobalTensor<uint64_t> cuSeqlensTensor;
          AscendC::GlobalTensor<uint64_t> chunkIndicesTensor;

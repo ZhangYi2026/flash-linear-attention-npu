@@ -304,14 +304,16 @@ namespace Catlass::Gemm::Kernel {
             uint64_t wsMm6Offset;
             uint64_t wsMm7Offset;
 
-            // 形状参数
+            // 形状参数 (GVA: H 拆为 HV/HK, HV = n_ratio * HK)
             uint64_t B;// = CONST_B;
-            uint64_t H;// = CONST_H;
+            uint64_t HV;           // value 侧 head 数 (v/g/h/do/dh/dv 及全部输出), == 原 H
+            uint64_t HK;           // key/query 侧 head 数 (q/k), HV = n_ratio * HK
             uint64_t T;// = CONST_T;
             uint64_t K;// = CONST_K;
             uint64_t V;// = CONST_V;
             uint64_t BT;// = CONST_BT;
             uint64_t numChunks;// = CONST_NUM_CHUNKS;
+            uint64_t n_ratio;      // HV / HK
             // uint64_t chunkSize = 64;
             uint64_t isVarLen;
 
@@ -328,7 +330,7 @@ namespace Catlass::Gemm::Kernel {
                 GM_ADDR do_, GM_ADDR dh, GM_ADDR dv, GM_ADDR cu_seqlen, GM_ADDR chunk_indices,
                 GM_ADDR dq, GM_ADDR dk, GM_ADDR dw, GM_ADDR dg,
                 GM_ADDR workspace,
-                uint64_t B, uint64_t H, uint64_t T, uint64_t K, uint64_t V, uint64_t BT, uint64_t numChunks,
+                uint64_t B, uint64_t HV, uint64_t HK, uint64_t T, uint64_t K, uint64_t V, uint64_t BT, uint64_t numChunks, uint64_t n_ratio,
                 uint64_t wsDw, uint64_t wsBtxKSlots, uint64_t wsDgLast, uint64_t wsMm5, uint64_t wsDsTemp,
                 uint64_t wsMm6, uint64_t wsMm7,
                 float s, uint64_t isVarLen
@@ -338,7 +340,7 @@ namespace Catlass::Gemm::Kernel {
                 ptrWorkspace(workspace),
                 wsDwOffset(wsDw), wsBtxKSyncSlotsPerHead(wsBtxKSlots), wsDgLastOffset(wsDgLast),
                 wsMm5Offset(wsMm5), wsDsTempOffset(wsDsTemp), wsMm6Offset(wsMm6), wsMm7Offset(wsMm7),
-                scale(s), B(B), H(H), T(T), K(K), V(V), BT(BT), numChunks(numChunks), isVarLen(isVarLen) {}
+                scale(s), B(B), HV(HV), HK(HK), T(T), K(K), V(V), BT(BT), numChunks(numChunks), n_ratio(n_ratio), isVarLen(isVarLen) {}
         };
 
         CATLASS_DEVICE
@@ -389,7 +391,7 @@ namespace Catlass::Gemm::Kernel {
                                                  (uint32_t)params.wsBtxKSyncSlotsPerHead);
             // ========== A_cube: dw = dv @ h^T, 然后 mm5 = q @ k^T ==========
             for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
-                GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.H, params.T,
+                GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.HV, params.T,
                                 params.BT, loopIdx, bos, eos);
                 uint32_t actual_chunk_len = eos - bos;
                 uint32_t bIdx = loopIdx / params.numChunks;
@@ -404,12 +406,13 @@ namespace Catlass::Gemm::Kernel {
                     };
                     WaitCredit();
                     BlockMmadPart1 blockMmadPart1(resource);
-                    for (uint32_t h = 0; h < params.H; h++) {
+                    for (uint32_t h = 0; h < params.HV; h++) {
                         uint64_t dvOffset = (h * params.T + bos) * params.V;
-                        uint64_t hOffset = ((bIdx * params.H + h) * params.numChunks + chunkIdx) * params.K * params.V;
-                        // dw 写组对齐环形槽 (常驻 L2): 偏移由 (coreIdx,loopBase,loopIdx,coreNum,h) 算出
+                        uint64_t hOffset = ((bIdx * params.HV + h) * params.numChunks + chunkIdx) * params.K * params.V;
+                        // dw 写 short 环槽 (深度自适应 2G-1, 贴 L2): 偏移由 (coreIdx,loopIdx,coreNum,h) 算出
                         uint64_t dwRingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
-                                                                              params.H, params.BT, params.K);
+                                                                              params.HV, params.BT, params.K,
+                                                                              DqkwgShortRingDepthFromGroup((uint32_t)params.wsBtxKSyncSlotsPerHead));
 
                         GlobalTensor<ElementA> gmDv;
                         gmDv.SetGlobalBuffer((__gm__ ElementA *)params.ptrDv + dvOffset);
@@ -445,10 +448,13 @@ namespace Catlass::Gemm::Kernel {
                         static_cast<uint32_t>(params.K)
                     };
                     BlockMmadPart2 blockMmadPart2(resource);
-                    for (uint32_t h = 0; h < params.H; h++) {
-                        uint64_t qkOffset = (h * params.T + bos) * params.K;
+                    for (uint32_t h = 0; h < params.HV; h++) {
+                        // GVA: q/k 为 HK 头; hv_idx=h -> hk_idx=h/n_ratio, 并把 HV-based bos 修正为 HK-based
+                        uint32_t hk_idx = h / params.n_ratio;
+                        uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(params.HV - params.HK) * params.T;
+                        uint64_t qkOffset = (hk_idx * params.T + bos_hk) * params.K;
                         uint64_t mm5Offset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                                      params.H, params.BT, params.K,
+                                                                      params.HV, params.BT, params.K,
                                                                       (uint32_t)params.wsBtxKSyncSlotsPerHead);
 
                         GlobalTensor<ElementA> gmQ;
@@ -478,7 +484,7 @@ namespace Catlass::Gemm::Kernel {
 
             // ========== B_cube: ds = do @ v^T -> wsDsTemp ==========
             for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
-                GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.H, params.T,
+                GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.HV, params.T,
                                 params.BT, loopIdx, bos, eos);
                 uint32_t actual_chunk_len = eos - bos;
                 uint32_t bIdx = loopIdx / params.numChunks;
@@ -491,10 +497,10 @@ namespace Catlass::Gemm::Kernel {
                 };
                 BlockMmadPart3 blockMmadPart3(resource);
                 WaitCredit();
-                for (uint32_t h = 0; h < params.H; h++) {
+                for (uint32_t h = 0; h < params.HV; h++) {
                     uint64_t dvOffset = (h * params.T + bos) * params.V;
                     uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                               params.H, params.BT,
+                                                               params.HV, params.BT,
                                                                (uint32_t)params.wsBtxKSyncSlotsPerHead);
 
                     GlobalTensor<ElementA> gmDo;
@@ -525,14 +531,14 @@ namespace Catlass::Gemm::Kernel {
             // ========== C_cube: dq_inner = do @ h^T -> ptrDq, 然后 mm6 = ds_temp @ k -> wsMm6 ==========
             // mm6 读取 B_vector 产出的 ds_temp(c); 进入 C_cube(c0)=task 2M 时 vector 已完成到 task 2M-2 >= B_vector(c0)=task M (M>=2)。
             for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
-                GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.H, params.T,
+                GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.HV, params.T,
                                 params.BT, loopIdx, bos, eos);
                 uint32_t actual_chunk_len = eos - bos;
                 uint32_t bIdx = loopIdx / params.numChunks;
                 uint32_t chunkIdx = loopIdx % params.numChunks;
 
                 WaitCredit();
-                for (uint32_t h = 0; h < params.H; h++) {
+                for (uint32_t h = 0; h < params.HV; h++) {
                     // --- Part4: dq_inner = do @ h^T -> ptrDq ---
                     {
                         GemmCoord actualBlockShape{
@@ -541,7 +547,7 @@ namespace Catlass::Gemm::Kernel {
                             static_cast<uint32_t>(params.V)
                         };
                         uint64_t doOffset = (h * params.T + bos) * params.V;
-                        uint64_t hOffset = ((bIdx * params.H + h) * params.numChunks + chunkIdx) * params.K * params.V;
+                        uint64_t hOffset = ((bIdx * params.HV + h) * params.numChunks + chunkIdx) * params.K * params.V;
                         uint64_t dqOffset = (h * params.T + bos) * params.K;
 
                         GlobalTensor<ElementA> gmDo;
@@ -573,17 +579,21 @@ namespace Catlass::Gemm::Kernel {
                             static_cast<uint32_t>(actual_chunk_len)
                         };
                         uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                                   params.H, params.BT,
+                                                                   params.HV, params.BT,
                                                                    (uint32_t)params.wsBtxKSyncSlotsPerHead);
-                        uint64_t kOffset = (h * params.T + bos) * params.K;
+                        // GVA: k 为 HK 头
+                        uint32_t hk_idx = h / params.n_ratio;
+                        uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(params.HV - params.HK) * params.T;
+                        uint64_t kOffset = (hk_idx * params.T + bos_hk) * params.K;
 
                         GlobalTensor<ElementA> gmDsTemp;
                         gmDsTemp.SetGlobalBuffer((__gm__ ElementA *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsDsTempOffset) + dsOffset);
                         GlobalTensor<ElementA> gmK;
                         gmK.SetGlobalBuffer((__gm__ ElementA *)params.ptrK + kOffset);
-                        GlobalTensor<ElementC> gmMm6;  // mm6 复用 dw 组对齐环形区 (stage C 内消费, 与 dw 同槽)
+                        GlobalTensor<ElementC> gmMm6;  // mm6 复用 dw short 环区 (stage C 内消费, 与 dw 同槽)
                         uint64_t mm6RingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
-                                                                              params.H, params.BT, params.K);
+                                                                              params.HV, params.BT, params.K,
+                                                                              DqkwgShortRingDepthFromGroup((uint32_t)params.wsBtxKSyncSlotsPerHead));
                         gmMm6.SetGlobalBuffer((__gm__ ElementC *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsMm6Offset) + mm6RingOffset);
 
                         auto tensorDsTemp = tla::MakeTensor(gmDsTemp, MakeLayoutFromTag(layoutBTxBT), Arch::PositionGM{});
@@ -608,14 +618,14 @@ namespace Catlass::Gemm::Kernel {
 
             // ========== D_cube: dk_inner = v @ dh -> ptrDk, 然后 mm7 = ds_temp^T @ q -> wsMm7 ==========
             for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
-                GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.H, params.T,
+                GetChunkOffset(params.ptrCuSeqLens, params.ptrChunkIndices, params.B, params.HV, params.T,
                                 params.BT, loopIdx, bos, eos);
                 uint32_t actual_chunk_len = eos - bos;
                 uint32_t bIdx = loopIdx / params.numChunks;
                 uint32_t chunkIdx = loopIdx % params.numChunks;
 
                 WaitCredit();
-                for (uint32_t h = 0; h < params.H; h++) {
+                for (uint32_t h = 0; h < params.HV; h++) {
                     // --- Part5: dk_inner = v @ dh -> ptrDk ---
                     {
                         GemmCoord actualBlockShape{
@@ -624,7 +634,7 @@ namespace Catlass::Gemm::Kernel {
                             static_cast<uint32_t>(params.V)
                         };
                         uint64_t vOffset = (h * params.T + bos) * params.V;
-                        uint64_t dhOffset = ((bIdx * params.H + h) * params.numChunks + chunkIdx) * params.K * params.V;
+                        uint64_t dhOffset = ((bIdx * params.HV + h) * params.numChunks + chunkIdx) * params.K * params.V;
                         uint64_t dkOffset = (h * params.T + bos) * params.K;
 
                         GlobalTensor<ElementA> gmV;
@@ -656,17 +666,21 @@ namespace Catlass::Gemm::Kernel {
                             static_cast<uint32_t>(actual_chunk_len)
                         };
                         uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                                   params.H, params.BT,
+                                                                   params.HV, params.BT,
                                                                    (uint32_t)params.wsBtxKSyncSlotsPerHead);
-                        uint64_t qOffset = (h * params.T + bos) * params.K;
+                        // GVA: q 为 HK 头
+                        uint32_t hk_idx = h / params.n_ratio;
+                        uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(params.HV - params.HK) * params.T;
+                        uint64_t qOffset = (hk_idx * params.T + bos_hk) * params.K;
 
                         GlobalTensor<ElementA> gmDsTemp;
                         gmDsTemp.SetGlobalBuffer((__gm__ ElementA *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsDsTempOffset) + dsOffset);
                         GlobalTensor<ElementA> gmQ;
                         gmQ.SetGlobalBuffer((__gm__ ElementA *)params.ptrQ + qOffset);
-                        GlobalTensor<ElementC> gmMm7;
-                        uint64_t mm7RingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
-                                                                              params.H, params.BT, params.K);
+                        GlobalTensor<ElementC> gmMm7;  // mm7 复用 mm5 的 group 环槽 (stage D 写, mm5 已在 stage B 消费完; 单写, 同 stride 无跨核冲突)
+                        uint64_t mm7RingOffset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                                                                         params.HV, params.BT, params.K,
+                                                                         (uint32_t)params.wsBtxKSyncSlotsPerHead);
                         gmMm7.SetGlobalBuffer((__gm__ ElementC *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsMm7Offset) + mm7RingOffset);
 
                         auto tensorDsTemp = tla::MakeTensor(gmDsTemp, MakeLayoutFromTag(layoutBTxBT_T), Arch::PositionGM{});
@@ -736,7 +750,9 @@ namespace Catlass::Gemm::Kernel {
 
         // Tiling 参数
         uint64_t B = CONST_B;
-        uint64_t H = CONST_H;
+        uint64_t HV = CONST_HV;
+        uint64_t HK = CONST_HK;
+        uint64_t n_ratio = 1;
         uint64_t T = CONST_T;
         uint64_t K = CONST_K;
         uint64_t V = CONST_V;
@@ -760,7 +776,9 @@ namespace Catlass::Gemm::Kernel {
     __aicore__ inline void ChunkBwdDqkwgCubeProcess<DataType, GType>::Init(const ChunkBwdDqkwgTilingData &tiling) {
         scale = tiling.scale;
         B = tiling.B;
-        H = tiling.H;
+        HV = tiling.HV;
+        HK = tiling.HK;
+        n_ratio = (HK > 0) ? (HV / HK) : 1;
         T = tiling.T;
         K = tiling.K;
         V = tiling.V;
@@ -854,7 +872,7 @@ namespace Catlass::Gemm::Kernel {
                 ptrQ, ptrK, ptrV, ptrG, ptrH,
                 ptrDo, ptrDh, ptrDv, ptrCuSeqLen, ptrChunkIndices,
                 ptrDq, ptrDk, ptrDw, ptrDg,
-                ptrWorkspace, B, H, T, K, V, BT, numChunks,
+                ptrWorkspace, B, HV, HK, T, K, V, BT, numChunks, n_ratio,
                 wsDwOffset, wsBtxKSyncSlotsPerHead, wsDgLastOffset, wsMm5Offset, wsDsTempOffset, wsMm6Offset, wsMm7Offset,
                 scale, isVarLen
             );
@@ -866,7 +884,7 @@ namespace Catlass::Gemm::Kernel {
                 ptrQ, ptrK, ptrV, ptrG, ptrH,
                 ptrDo, ptrDh, ptrDv, ptrCuSeqLen, ptrChunkIndices,
                 ptrDq, ptrDk, ptrDw, ptrDg,
-                ptrWorkspace, B, H, T, K, V, BT, numChunks,
+                ptrWorkspace, B, HV, HK, T, K, V, BT, numChunks, n_ratio,
                 wsDwOffset, wsBtxKSyncSlotsPerHead, wsDgLastOffset, wsMm5Offset, wsDsTempOffset, wsMm6Offset, wsMm7Offset,
                 scale, isVarLen
             );
