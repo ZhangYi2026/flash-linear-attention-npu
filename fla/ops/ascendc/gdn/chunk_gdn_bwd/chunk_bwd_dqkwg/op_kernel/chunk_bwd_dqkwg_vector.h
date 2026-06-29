@@ -116,7 +116,6 @@
      uint64_t wsMm6Offset;
      uint64_t wsMm7Offset;
      uint64_t wsMul1Offset;
-     bool useGlobalWs = false;  // 大 case: 全局 streaming 工作区 (= main 寻址), 见 DqkwgUseGlobalWs
      int BUFFER_NUM = 1;
 
      // Pipeline
@@ -185,8 +184,6 @@
      V = tiling.V;
      BT = tiling.BT;
      numChunks = tiling.numChunks;
-     // 大 case 改用全局 streaming 工作区 (= main 寻址); 判据与 host tiling / cube 完全一致 (字节级同公式)。
-     useGlobalWs = DqkwgUseGlobalWs(B, HV, T, K, BT, numChunks);
      aicCoreNum = tiling.aicCoreNum;
      wsDwOffset = tiling.wsDwOffset;
      wsBtxKSyncSlotsPerHead = tiling.wsBtxKSyncSlotsPerHead;
@@ -460,14 +457,10 @@
                  }
                  uint64_t hOffset = ((bIdx * HV + h) * numChunks + chunkIdx) * K * V;
                  uint64_t dwOffset = (h * T + bos) * K;  // 最终输出 ptrDw 仍全局寻址
-                 uint64_t dwRingOffset = useGlobalWs
-                     ? DqkwgGlobalBtxKOffset(h, T, bos, K)
-                     : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
+                 uint64_t dwRingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
                                                                        DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
 
-                 uint64_t dgLastOffset = useGlobalWs
-                     ? DqkwgGlobalScalarOffset(bIdx, h, HV, numChunks, chunkIdx)
-                     : DqkwgScalarRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV,
+                 uint64_t dgLastOffset = DqkwgScalarRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV,
                                                                    (uint32_t)wsBtxKSyncSlotsPerHead);
 
                  // ===== dg_last = sum(h * dh) =====
@@ -581,11 +574,9 @@
                      continue;
                  }
                  uint64_t gOffset = (h * T + bos);   // 整 chunk 的 g (从原始 bos)
-                 uint64_t mul1Offset = (useGlobalWs
-                     ? DqkwgGlobalBtbOffset(h, T, bos, BT)
-                     : DqkwgShortBtbRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT,
-                                                                   DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead)))
-                                       + static_cast<uint64_t>(BT_sub_start) * BT;
+                 uint64_t mul1Offset = DqkwgShortBtbRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT,
+                                                                   DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead)) +
+                                       static_cast<uint64_t>(BT_sub_start) * BT;
 
                  {
                      auto tensorGIn = inQue3.AllocTensor<GType>();
@@ -702,17 +693,11 @@
                  continue;
              }
              uint64_t gOffset = (h * T + bos);
-             uint64_t dsOffset = useGlobalWs
-                 ? DqkwgGlobalBtbOffset(h, T, bos, BT)
-                 : DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT,
+             uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT,
                                                         (uint32_t)wsBtxKSyncSlotsPerHead);
-             uint64_t mul1Offset = useGlobalWs
-                 ? DqkwgGlobalBtbOffset(h, T, bos, BT)
-                 : DqkwgShortBtbRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT,
+             uint64_t mul1Offset = DqkwgShortBtbRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT,
                                                                DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
-             uint64_t mm5Offset = useGlobalWs
-                 ? DqkwgGlobalBtxKOffset(h, T, bos, K)
-                 : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
+             uint64_t mm5Offset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
                                                           (uint32_t)wsBtxKSyncSlotsPerHead);
              uint64_t dgOffset = gOffset;
 
@@ -962,9 +947,7 @@
                  // dq += mm6 (从 wsMm6 环形区读取, dq_state 仍在 UB)
                  {
                      auto tensorMm6In = inQue2.AllocTensor<DataType>();
-                     uint64_t mm6RingOffset = useGlobalWs
-                         ? DqkwgGlobalBtxKOffset(h, T, bos, K)
-                         : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
+                     uint64_t mm6RingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
                                                                            DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
                      DataCopy(tensorMm6In[dqSize_sub], gmMm6[mm6RingOffset], dqSize_sub);  // mm6 compact ring
                      inQue2.EnQue(tensorMm6In);
@@ -1056,9 +1039,7 @@
              // 跨 stage 可见性由 Process() 中 A->B->C->D 的 PipeBarrier<PIPE_ALL> 保证; A(c,h)/D(c,h) 同 sub-block。
              // 输出格式与原重算一致: tensorGLastFp32Tmp[16..23] = 8 份 dg_last。
              {
-                 uint64_t dgLastOffset = useGlobalWs
-                     ? DqkwgGlobalScalarOffset(bIdx, h, HV, numChunks, chunkIdx)
-                     : DqkwgScalarRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV,
+                 uint64_t dgLastOffset = DqkwgScalarRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV,
                                                                    (uint32_t)wsBtxKSyncSlotsPerHead);
                  {
                      DataCopyExtParams copyParams{1, sizeof(float), 0, 0, 0};
@@ -1198,9 +1179,7 @@
                  // dk += mm7 (从 wsMm7 读取, dk_state 仍在 UB)
                  {
                      auto tensorMm7In = inQue2.AllocTensor<DataType>();
-                     uint64_t mm7RingOffset = useGlobalWs
-                         ? DqkwgGlobalBtxKOffset(h, T, bos, K)
-                         : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
+                     uint64_t mm7RingOffset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
                                                                       (uint32_t)wsBtxKSyncSlotsPerHead);  // mm7 用 group 环 (与 cube 一致)
                      DataCopy(tensorMm7In[dkSize], gmMm7[mm7RingOffset], dkSize);
                      inQue2.EnQue(tensorMm7In);
