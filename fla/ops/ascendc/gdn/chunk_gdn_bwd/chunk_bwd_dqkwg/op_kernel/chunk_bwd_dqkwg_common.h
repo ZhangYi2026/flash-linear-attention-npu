@@ -168,6 +168,30 @@
  #define CEIL_DIV(x, y) (((x) + (y) - 1) / (y))
  #define ALIGN_UP(x, align) (((x) + (align) - 1) / (align) * (align))
 
+ // ---- 全局 (main 式) streaming 工作区: 大 case 的有界环装不进 L2 预算, 环的 slot 复用 (WAR) 反而比 main
+ // 全局唯一寻址更颠簸 L2 (msprof: L2 victim +29%, cube FixPipe 被打满) -> 这类 case 改回 main 的全局寻址,
+ // 每个 (h,chunk) 唯一 offset, 写一次读一次 (streaming), 无环复用。判据: 全局工作区 > L2 环预算 (512MB) 时启用
+ // (即环本来就被预算压到装不进 L2 的 case)。cube/host-tiling 用完全相同的公式, 保证寻址/分配一致。
+ constexpr uint64_t DQKWG_L2_RING_BUDGET = 512ULL * 1024 * 1024;
+ __aicore__ inline bool DqkwgUseGlobalWs(uint64_t B, uint64_t HV, uint64_t T, uint64_t K, uint64_t BT, uint64_t numChunks) {
+     uint64_t mainWs = B * HV * T * K * FP16_SIZE         // mm5
+                     + B * HV * T * BT * FP16_SIZE        // ds_temp
+                     + B * HV * numChunks * FP32_SIZE;    // dg_last
+     return mainWs > DQKWG_L2_RING_BUDGET;
+ }
+ // 全局唯一 element offset (= main): BtxK 类张量 (dw/mm5/mm6/mm7) 步长 K, 区 [B,HV,T,K]; bos 已含 bIdx*HV*T。
+ __aicore__ inline uint64_t DqkwgGlobalBtxKOffset(uint32_t h, uint64_t T, uint32_t bos, uint64_t K) {
+     return ((uint64_t)h * T + (uint64_t)bos) * K;
+ }
+ // BtxBT 类 (ds_temp/mul1) 步长 BT, 区 [B,HV,T,BT]。
+ __aicore__ inline uint64_t DqkwgGlobalBtbOffset(uint32_t h, uint64_t T, uint32_t bos, uint64_t BT) {
+     return ((uint64_t)h * T + (uint64_t)bos) * BT;
+ }
+ // dg_last 标量, 区 [B,HV,numChunks], offset (bIdx*HV+h)*numChunks+chunkIdx。
+ __aicore__ inline uint64_t DqkwgGlobalScalarOffset(uint32_t bIdx, uint32_t h, uint64_t HV, uint64_t numChunks, uint32_t chunkIdx) {
+     return ((uint64_t)bIdx * HV + (uint64_t)h) * numChunks + (uint64_t)chunkIdx;
+ }
+
  template<typename T>
  struct TypeTraits {
      using ComputeType = float;  // 默认计算类型为 fp32

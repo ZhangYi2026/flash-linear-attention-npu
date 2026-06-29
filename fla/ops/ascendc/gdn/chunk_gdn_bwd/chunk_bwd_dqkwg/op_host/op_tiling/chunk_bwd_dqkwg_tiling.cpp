@@ -242,6 +242,33 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
     size_t wsMm7Offset = wsMm5Offset;
     size_t totalUserWorkspace = offset;
 
+    // ---- 大 case: 全局 streaming 工作区 (= main 寻址), 替换有界环 ----
+    // msprof 实锤 (step2_12): 环 ~0.9GB 装不进 L2, slot 复用 (WAR) 比 main 全局唯一寻址更颠簸 L2 (victim +29%,
+    // cube FixPipe 被打满 +4.4ms), 而非同步空转 (aiv_scalar 反而更低)。故对"全局工作区 > 512MB 环预算"的 case
+    // 改回 main 的全局唯一寻址 (写一次读一次 streaming, 无 reuse), 消除 L2 颠簸。判据与 kernel DqkwgUseGlobalWs 完全一致。
+    // 环本来就 <=512MB 的 (L2 驻留有收益的) 好 case 不命中此分支, 字节不变。
+    const bool useGlobalWs =
+        (static_cast<size_t>(B) * HV * T * K * FP16_SIZE +
+         static_cast<size_t>(B) * HV * T * BT * FP16_SIZE +
+         static_cast<size_t>(B) * HV * numChunks * FP32_SIZE) > (static_cast<size_t>(512) * 1024 * 1024);
+    if (useGlobalWs) {
+        const size_t gBtxK = align32(static_cast<size_t>(B) * HV * T * K * FP16_SIZE);
+        const size_t gBtb  = align32(static_cast<size_t>(B) * HV * T * BT * FP16_SIZE);
+        const size_t gDg   = align32(static_cast<size_t>(B) * HV * numChunks * FP32_SIZE);
+        size_t goff = 0;
+        wsDwOffset = goff;     goff += gBtxK;   // dw (+ stage C mm6 复用)
+        wsMm5Offset = goff;    goff += gBtxK;   // mm5 (+ stage D mm7 复用)
+        wsDsTempOffset = goff; goff += gBtb;    // ds_temp
+        wsMul1Offset = goff;   goff += gBtb;    // mul1
+        wsDgLastOffset = goff; goff += gDg;     // dg_last
+        wsMm6Offset = wsDwOffset;   // mm6 复用 dw 区 (dw 经 vector A 消费后, stage C 才写 mm6, 寿命不叠)
+        wsMm7Offset = wsMm5Offset;  // mm7 复用 mm5 区 (mm5 经 vector B 消费后, stage D 才写 mm7)
+        dgLastSize = gDg;
+        totalUserWorkspace = goff;
+        // groupRingDepth 仅留作信用窗口 N=min(G,M) 与分组边界 (全局寻址下深度不占内存); 取 G=4 (preseed<=4, 不撑爆 credit flag)。
+        groupRingDepth = 16;
+    }
+
     // 设置 workspace 大小
     size_t* workspaces = context->GetWorkspaceSizes(1);
     workspaces[0] = static_cast<size_t>(sysWorkspaceSize + totalUserWorkspace);

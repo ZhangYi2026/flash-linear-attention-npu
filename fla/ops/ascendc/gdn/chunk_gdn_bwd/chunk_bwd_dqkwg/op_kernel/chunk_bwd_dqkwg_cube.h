@@ -385,6 +385,8 @@ namespace Catlass::Gemm::Kernel {
             // cube WaitCredit 总次数 == L (==4M); 与 vector 端预置 N + SetCredit L 对应, 末尾余 N 信用 (无害)。
             // 现按 chunk-group-major 组织: 外层按 G 个 chunk 一组, 组内 A->B->C->D 连着做 (组的输入在 L2 内复用)。
 
+            // 大 case 改用全局 streaming 工作区 (= main 寻址), 消除有界环的 L2 颠簸; 判据与 host tiling 完全一致。
+            const bool useGlobalWs = DqkwgUseGlobalWs(params.B, params.HV, params.T, params.K, params.BT, params.numChunks);
             uint32_t loopBase = coreIdx;
             while (loopBase < coreLoops) {
                 uint32_t loopEnd = DqkwgGroupEnd(loopBase, coreLoops, coreNum,
@@ -410,7 +412,9 @@ namespace Catlass::Gemm::Kernel {
                         uint64_t dvOffset = (h * params.T + bos) * params.V;
                         uint64_t hOffset = ((bIdx * params.HV + h) * params.numChunks + chunkIdx) * params.K * params.V;
                         // dw 写 short 环槽 (深度自适应 2G-1, 贴 L2): 偏移由 (coreIdx,loopIdx,coreNum,h) 算出
-                        uint64_t dwRingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
+                        uint64_t dwRingOffset = useGlobalWs
+                            ? DqkwgGlobalBtxKOffset(h, params.T, bos, params.K)
+                            : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
                                                                               params.HV, params.BT, params.K,
                                                                               DqkwgShortRingDepthFromGroup((uint32_t)params.wsBtxKSyncSlotsPerHead));
 
@@ -453,7 +457,9 @@ namespace Catlass::Gemm::Kernel {
                         uint32_t hk_idx = h / params.n_ratio;
                         uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(params.HV - params.HK) * params.T;
                         uint64_t qkOffset = (hk_idx * params.T + bos_hk) * params.K;
-                        uint64_t mm5Offset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                        uint64_t mm5Offset = useGlobalWs
+                            ? DqkwgGlobalBtxKOffset(h, params.T, bos, params.K)
+                            : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
                                                                       params.HV, params.BT, params.K,
                                                                       (uint32_t)params.wsBtxKSyncSlotsPerHead);
 
@@ -499,7 +505,9 @@ namespace Catlass::Gemm::Kernel {
                 WaitCredit();
                 for (uint32_t h = 0; h < params.HV; h++) {
                     uint64_t dvOffset = (h * params.T + bos) * params.V;
-                    uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                    uint64_t dsOffset = useGlobalWs
+                        ? DqkwgGlobalBtbOffset(h, params.T, bos, params.BT)
+                        : DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
                                                                params.HV, params.BT,
                                                                (uint32_t)params.wsBtxKSyncSlotsPerHead);
 
@@ -578,7 +586,9 @@ namespace Catlass::Gemm::Kernel {
                             static_cast<uint32_t>(params.K),
                             static_cast<uint32_t>(actual_chunk_len)
                         };
-                        uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                        uint64_t dsOffset = useGlobalWs
+                            ? DqkwgGlobalBtbOffset(h, params.T, bos, params.BT)
+                            : DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
                                                                    params.HV, params.BT,
                                                                    (uint32_t)params.wsBtxKSyncSlotsPerHead);
                         // GVA: k 为 HK 头
@@ -591,7 +601,9 @@ namespace Catlass::Gemm::Kernel {
                         GlobalTensor<ElementA> gmK;
                         gmK.SetGlobalBuffer((__gm__ ElementA *)params.ptrK + kOffset);
                         GlobalTensor<ElementC> gmMm6;  // mm6 复用 dw short 环区 (stage C 内消费, 与 dw 同槽)
-                        uint64_t mm6RingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
+                        uint64_t mm6RingOffset = useGlobalWs
+                            ? DqkwgGlobalBtxKOffset(h, params.T, bos, params.K)
+                            : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
                                                                               params.HV, params.BT, params.K,
                                                                               DqkwgShortRingDepthFromGroup((uint32_t)params.wsBtxKSyncSlotsPerHead));
                         gmMm6.SetGlobalBuffer((__gm__ ElementC *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsMm6Offset) + mm6RingOffset);
@@ -665,7 +677,9 @@ namespace Catlass::Gemm::Kernel {
                             static_cast<uint32_t>(params.K),
                             static_cast<uint32_t>(actual_chunk_len)
                         };
-                        uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                        uint64_t dsOffset = useGlobalWs
+                            ? DqkwgGlobalBtbOffset(h, params.T, bos, params.BT)
+                            : DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
                                                                    params.HV, params.BT,
                                                                    (uint32_t)params.wsBtxKSyncSlotsPerHead);
                         // GVA: q 为 HK 头
@@ -678,7 +692,9 @@ namespace Catlass::Gemm::Kernel {
                         GlobalTensor<ElementA> gmQ;
                         gmQ.SetGlobalBuffer((__gm__ ElementA *)params.ptrQ + qOffset);
                         GlobalTensor<ElementC> gmMm7;  // mm7 复用 mm5 的 group 环槽 (stage D 写, mm5 已在 stage B 消费完; 单写, 同 stride 无跨核冲突)
-                        uint64_t mm7RingOffset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                        uint64_t mm7RingOffset = useGlobalWs
+                            ? DqkwgGlobalBtxKOffset(h, params.T, bos, params.K)
+                            : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
                                                                          params.HV, params.BT, params.K,
                                                                          (uint32_t)params.wsBtxKSyncSlotsPerHead);
                         gmMm7.SetGlobalBuffer((__gm__ ElementC *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsMm7Offset) + mm7RingOffset);
