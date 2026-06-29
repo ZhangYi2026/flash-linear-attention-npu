@@ -240,7 +240,14 @@
      uint32_t coreLoops = B * numChunks;
      uint32_t M = (coreIdx < coreLoops) ? ((coreLoops - 1 - coreIdx) / coreNum + 1) : 0;
      uint32_t groupSize = DqkwgGroupSizeFromRingDepth((uint32_t)wsBtxKSyncSlotsPerHead);
-     uint32_t preseed = M < groupSize ? M : groupSize;
+     // 大 memory-bound case: cube 领先 vector 越多 -> cube/vector 同时在不同 stage 上 -> L2 工作集越杂 -> FixPipe/MTE2
+     // 颠簸 (msprof: FixPipe 均匀 +14.6%/part, L2 victim +29%, 且 N=4 比 N=2 更慢)。这类把信用窗口收到 1 (近 lockstep,
+     // 同 main 的 SyncAll 逐 stage 节奏): cube/vector 基本在同一 task -> L2 工作集小 -> streaming。环/内存不变, 只削重叠。
+     // 小 case (mainWs<=512MB) 不命中, 仍 min(groupSize,M) 吃满重叠。判据与 host tiling 同公式。
+     uint64_t mainWsBytes = (uint64_t)B * HV * T * K * 2 + (uint64_t)B * HV * T * BT * 2 + (uint64_t)B * HV * numChunks * 4;
+     bool largeMemBound = mainWsBytes > (512ULL * 1024 * 1024);
+     uint32_t preseed = largeMemBound ? (M < 1 ? M : 1)
+                                      : (M < groupSize ? M : groupSize);
      for (uint32_t i = 0; i < preseed; i++) {
          SetVecCredit();
      }
