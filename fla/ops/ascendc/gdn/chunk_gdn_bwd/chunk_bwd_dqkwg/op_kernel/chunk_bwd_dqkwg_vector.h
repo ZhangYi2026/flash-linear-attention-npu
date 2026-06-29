@@ -395,6 +395,9 @@
      const uint32_t hDhSize = mul0RowNum * V;
      const uint32_t dwSize = BT * K;
      const uint32_t gSize = BT;
+     // 诊断 (同 ProcessBVector): 大 case 缩小 mul1 GM 写, 配合 B 端缩小读, 把 mul1 整个往返流量去掉 (~3.2GB), 看 perf。
+     const bool largeMemBound_diag =
+         ((uint64_t)B * HV * T * K * 2 + (uint64_t)B * HV * T * BT * 2 + (uint64_t)B * HV * numChunks * 4) > (512ULL * 1024 * 1024);
      const uint32_t maxSize = (2 * hDhSize) > dwSize ? (2 * hDhSize) : dwSize;
 
      // ----- Part1 buffers (h/dh, dw) -----
@@ -649,7 +652,8 @@
                  }
                  {
                      auto tensorDsTempOut = outQue2.DeQue<float>();
-                     DataCopy(gmMul1[mul1Offset], tensorDsTempOut.template ReinterpretCast<DataType>(), real_BT * BT);
+                     // 诊断: 大 case 只写 1 个 block-row, 去掉 ~99% 的 mul1 GM 写流量 (配合 B 端缩小读; golden 必挂, 只看 perf)
+                     DataCopy(gmMul1[mul1Offset], tensorDsTempOut.template ReinterpretCast<DataType>(), largeMemBound_diag ? gSize : (real_BT * BT));
                      outQue2.FreeTensor(tensorDsTempOut);
                  }
              }
@@ -671,6 +675,12 @@
 
      uint32_t dsSize_full = BT * BT;
      const uint32_t gSize = BT;
+
+     // ===== 诊断 (golden 会挂, 只看 perf): 大 memory-bound case 跳过 mul1 的 GM 读, 验证 mul1 往返 (~1.6GB 读)
+     // 是否在和 cube FixPipe 抢 HBM 带宽。若 perf 大幅提升 => 确认, 再做正确的 mul1 内联重构; 若无变化 => 另寻。
+     // 判据与 host tiling 同公式。小 case 不动 (仍正常读 mul1, golden 正常)。
+     const bool largeMemBound_diag =
+         ((uint64_t)B * HV * T * K * 2 + (uint64_t)B * HV * T * BT * 2 + (uint64_t)B * HV * numChunks * 4) > (512ULL * 1024 * 1024);
 
      pipe->InitBuffer(inQue1, BUFFER_NUM, dsSize_full * sizeof(float));    // ds from Cube (含 reinterpret)
      pipe->InitBuffer(inQue2, BUFFER_NUM, dsSize_full * sizeof(float));    // mm5/mul1 from workspace
@@ -705,7 +715,9 @@
                  auto tensorDsIn = inQue1.AllocTensor<DataType>();
                  auto tensorMul1In = inQue2.AllocTensor<DataType>();
                  DataCopy(tensorDsIn[BT * BT], gmDsTemp[dsOffset], dsSize_sub);
-                 DataCopy(tensorMul1In[BT * BT], gmMul1[mul1Offset], dsSize_sub);
+                 // 诊断: 大 case 只读 1 个 block-row (gSize=BT) 而非整块 dsSize_sub, 去掉 ~99% 的 mul1 GM 读流量
+                 // (其余为 UB 残留 -> golden 必挂, 只看 perf)。MTE2/queue 同步不变 (仍是 DataCopy, 只是 count 变小)。
+                 DataCopy(tensorMul1In[BT * BT], gmMul1[mul1Offset], largeMemBound_diag ? gSize : dsSize_sub);
                  inQue1.EnQue(tensorDsIn);
                  inQue2.EnQue(tensorMul1In);
              }
