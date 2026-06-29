@@ -389,7 +389,10 @@ namespace Catlass::Gemm::Kernel {
             const bool useGlobalWs = DqkwgUseGlobalWs(params.B, params.HV, params.T, params.K, params.BT, params.numChunks);
             uint32_t loopBase = coreIdx;
             while (loopBase < coreLoops) {
-                uint32_t loopEnd = DqkwgGroupEnd(loopBase, coreLoops, coreNum,
+                // 全局模式: 单组覆盖全部 chunk = stage-major (A[全]B[全]C[全]D[全], 同 main) —— FixPipe/MTE2 按
+                // 单张量 streaming, 消除 group-major 的跨 7 区交错写 (L2 victim) 与大 case 输入重读。信用窗口仍 =4 (preseed),
+                // 内存受限不靠重叠, ds_temp 安全 N<=M 成立; 全局唯一寻址下深流水 (全 chunk 同时存活) 内存可承受。
+                uint32_t loopEnd = useGlobalWs ? coreLoops : DqkwgGroupEnd(loopBase, coreLoops, coreNum,
                                                  (uint32_t)params.wsBtxKSyncSlotsPerHead);
             // ========== A_cube: dw = dv @ h^T, 然后 mm5 = q @ k^T ==========
             for (uint32_t loopIdx = loopBase; loopIdx < loopEnd; loopIdx += coreNum) {
