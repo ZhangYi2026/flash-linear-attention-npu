@@ -258,9 +258,7 @@
      //   信用 flag 跨组连续 (preseed 一次); ds_temp 安全靠每组 >= N (DqkwgGroupEnd 的尾巴合并保证)。
      uint32_t loopBase = coreIdx;
      while (loopBase < coreLoops) {
-         // 全局模式: 单组 = stage-major (与 cube 同), 见 cube.h 注释。cube/vector 用同一 useGlobalWs => 组边界一致。
-         uint32_t loopEnd = useGlobalWs ? coreLoops
-                                        : DqkwgGroupEnd(loopBase, coreLoops, coreNum, (uint32_t)wsBtxKSyncSlotsPerHead);
+         uint32_t loopEnd = DqkwgGroupEnd(loopBase, coreLoops, coreNum, (uint32_t)wsBtxKSyncSlotsPerHead);
          ProcessAVector(loopBase, loopEnd);
          ResetStagePipe();
          ProcessBVector(loopBase, loopEnd);
