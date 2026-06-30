@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -274,23 +274,23 @@ namespace Catlass::Gemm::Kernel {
         /// Parameters structure
         struct Params {
             // 输入指针
-            GM_ADDR ptrQ;      // [B, H, T, K]
-            GM_ADDR ptrK;      // [B, H, T, K]
-            GM_ADDR ptrV;      // [B, H, T, V]
-            GM_ADDR ptrG;      // [B, H, T]
-            GM_ADDR ptrH;      // [B, num_chunks, H, K, V]
-            GM_ADDR ptrDo;     // [B, H, T, V]
-            GM_ADDR ptrDh;     // [B, num_chunks, H, K, V]
-            GM_ADDR ptrDv;     // [B, H, T, V]
+            GM_ADDR ptrQ;      // [B, HK, T, K]
+            GM_ADDR ptrK;      // [B, HK, T, K]
+            GM_ADDR ptrV;      // [B, HV, T, V]
+            GM_ADDR ptrG;      // [B, HV, T]
+            GM_ADDR ptrH;      // [B, HV, num_chunks, K, V]
+            GM_ADDR ptrDo;     // [B, HV, T, V]
+            GM_ADDR ptrDh;     // [B, HV, num_chunks, K, V]
+            GM_ADDR ptrDv;     // [B, HV, T, V]
             //varlen
             GM_ADDR ptrCuSeqLens;
             GM_ADDR ptrChunkIndices;
 
             // 输出指针
-            GM_ADDR ptrDq;     // [B, H, T, K]
-            GM_ADDR ptrDk;     // [B, H, T, K]
-            GM_ADDR ptrDw;     // [B, H, T, K]
-            GM_ADDR ptrDg;     // [B, H, T]
+            GM_ADDR ptrDq;     // [B, HV, T, K]
+            GM_ADDR ptrDk;     // [B, HV, T, K]
+            GM_ADDR ptrDw;     // [B, HV, T, K]
+            GM_ADDR ptrDg;     // [B, HV, T]
 
             // Workspace 指针
             GM_ADDR ptrWorkspace;
@@ -365,6 +365,7 @@ namespace Catlass::Gemm::Kernel {
             uint32_t coreIdx = AscendC::GetBlockIdx();
             uint32_t coreNum = params.aicCoreNum;   // CV 深融合 blockDim (cube/vector 共用)
 
+            const bool mainWorkspaceMode = DqkwgUseMainWorkspace((uint32_t)params.wsBtxKSyncSlotsPerHead);
             uint32_t coreLoops = params.B * params.numChunks;
 
             // Layout 创建
@@ -410,16 +411,22 @@ namespace Catlass::Gemm::Kernel {
                         uint64_t dvOffset = (h * params.T + bos) * params.V;
                         uint64_t hOffset = ((bIdx * params.HV + h) * params.numChunks + chunkIdx) * params.K * params.V;
                         // dw 写 short 环槽 (深度自适应 2G-1, 贴 L2): 偏移由 (coreIdx,loopIdx,coreNum,h) 算出
-                        uint64_t dwRingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
-                                                                              params.HV, params.BT, params.K,
-                                                                              DqkwgShortRingDepthFromGroup((uint32_t)params.wsBtxKSyncSlotsPerHead));
+                        uint64_t dwRingOffset = mainWorkspaceMode
+                            ? DqkwgMainBtxKElemOffset(h, bos, params.T, params.K)
+                            : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
+                                                           params.HV, params.BT, params.K,
+                                                           DqkwgShortRingDepthFromGroup((uint32_t)params.wsBtxKSyncSlotsPerHead));
 
                         GlobalTensor<ElementA> gmDv;
                         gmDv.SetGlobalBuffer((__gm__ ElementA *)params.ptrDv + dvOffset);
                         GlobalTensor<ElementA> gmH;
                         gmH.SetGlobalBuffer((__gm__ ElementA *)params.ptrH + hOffset);
                         GlobalTensor<ElementC> gmDw;
-                        gmDw.SetGlobalBuffer((__gm__ ElementC *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsDwOffset) + dwRingOffset);
+                        if (mainWorkspaceMode) {
+                            gmDw.SetGlobalBuffer((__gm__ ElementC *)params.ptrDw + dwRingOffset);
+                        } else {
+                            gmDw.SetGlobalBuffer((__gm__ ElementC *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsDwOffset) + dwRingOffset);
+                        }
 
                         auto tensorDv = tla::MakeTensor(gmDv, MakeLayoutFromTag(layoutBTxV), Arch::PositionGM{});
                         auto tensorH = tla::MakeTensor(gmH, MakeLayoutFromTag(layoutVxK), Arch::PositionGM{});  // h^T
@@ -453,9 +460,11 @@ namespace Catlass::Gemm::Kernel {
                         uint32_t hk_idx = h / params.n_ratio;
                         uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(params.HV - params.HK) * params.T;
                         uint64_t qkOffset = (hk_idx * params.T + bos_hk) * params.K;
-                        uint64_t mm5Offset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                                      params.HV, params.BT, params.K,
-                                                                      (uint32_t)params.wsBtxKSyncSlotsPerHead);
+                        uint64_t mm5Offset = mainWorkspaceMode
+                            ? DqkwgMainBtxKElemOffset(h, bos, params.T, params.K)
+                            : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                                                       params.HV, params.BT, params.K,
+                                                       (uint32_t)params.wsBtxKSyncSlotsPerHead);
 
                         GlobalTensor<ElementA> gmQ;
                         gmQ.SetGlobalBuffer((__gm__ ElementA *)params.ptrQ + qkOffset);
@@ -499,9 +508,11 @@ namespace Catlass::Gemm::Kernel {
                 WaitCredit();
                 for (uint32_t h = 0; h < params.HV; h++) {
                     uint64_t dvOffset = (h * params.T + bos) * params.V;
-                    uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                               params.HV, params.BT,
-                                                               (uint32_t)params.wsBtxKSyncSlotsPerHead);
+                    uint64_t dsOffset = mainWorkspaceMode
+                        ? DqkwgMainBtbElemOffset(h, bos, params.T, params.BT)
+                        : DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                                                 params.HV, params.BT,
+                                                 (uint32_t)params.wsBtxKSyncSlotsPerHead);
 
                     GlobalTensor<ElementA> gmDo;
                     gmDo.SetGlobalBuffer((__gm__ ElementA *)params.ptrDo + dvOffset);
@@ -578,9 +589,11 @@ namespace Catlass::Gemm::Kernel {
                             static_cast<uint32_t>(params.K),
                             static_cast<uint32_t>(actual_chunk_len)
                         };
-                        uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                                   params.HV, params.BT,
-                                                                   (uint32_t)params.wsBtxKSyncSlotsPerHead);
+                        uint64_t dsOffset = mainWorkspaceMode
+                            ? DqkwgMainBtbElemOffset(h, bos, params.T, params.BT)
+                            : DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                                                     params.HV, params.BT,
+                                                     (uint32_t)params.wsBtxKSyncSlotsPerHead);
                         // GVA: k 为 HK 头
                         uint32_t hk_idx = h / params.n_ratio;
                         uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(params.HV - params.HK) * params.T;
@@ -591,9 +604,11 @@ namespace Catlass::Gemm::Kernel {
                         GlobalTensor<ElementA> gmK;
                         gmK.SetGlobalBuffer((__gm__ ElementA *)params.ptrK + kOffset);
                         GlobalTensor<ElementC> gmMm6;  // mm6 复用 dw short 环区 (stage C 内消费, 与 dw 同槽)
-                        uint64_t mm6RingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
-                                                                              params.HV, params.BT, params.K,
-                                                                              DqkwgShortRingDepthFromGroup((uint32_t)params.wsBtxKSyncSlotsPerHead));
+                        uint64_t mm6RingOffset = mainWorkspaceMode
+                            ? DqkwgMainBtxKElemOffset(h, bos, params.T, params.K)
+                            : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h,
+                                                           params.HV, params.BT, params.K,
+                                                           DqkwgShortRingDepthFromGroup((uint32_t)params.wsBtxKSyncSlotsPerHead));
                         gmMm6.SetGlobalBuffer((__gm__ ElementC *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsMm6Offset) + mm6RingOffset);
 
                         auto tensorDsTemp = tla::MakeTensor(gmDsTemp, MakeLayoutFromTag(layoutBTxBT), Arch::PositionGM{});
@@ -665,9 +680,11 @@ namespace Catlass::Gemm::Kernel {
                             static_cast<uint32_t>(params.K),
                             static_cast<uint32_t>(actual_chunk_len)
                         };
-                        uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                                   params.HV, params.BT,
-                                                                   (uint32_t)params.wsBtxKSyncSlotsPerHead);
+                        uint64_t dsOffset = mainWorkspaceMode
+                            ? DqkwgMainBtbElemOffset(h, bos, params.T, params.BT)
+                            : DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                                                     params.HV, params.BT,
+                                                     (uint32_t)params.wsBtxKSyncSlotsPerHead);
                         // GVA: q 为 HK 头
                         uint32_t hk_idx = h / params.n_ratio;
                         uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(params.HV - params.HK) * params.T;
@@ -678,9 +695,11 @@ namespace Catlass::Gemm::Kernel {
                         GlobalTensor<ElementA> gmQ;
                         gmQ.SetGlobalBuffer((__gm__ ElementA *)params.ptrQ + qOffset);
                         GlobalTensor<ElementC> gmMm7;  // mm7 复用 mm5 的 group 环槽 (stage D 写, mm5 已在 stage B 消费完; 单写, 同 stride 无跨核冲突)
-                        uint64_t mm7RingOffset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
-                                                                         params.HV, params.BT, params.K,
-                                                                         (uint32_t)params.wsBtxKSyncSlotsPerHead);
+                        uint64_t mm7RingOffset = mainWorkspaceMode
+                            ? DqkwgMainBtxKElemOffset(h, bos, params.T, params.K)
+                            : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h,
+                                                       params.HV, params.BT, params.K,
+                                                       (uint32_t)params.wsBtxKSyncSlotsPerHead);
                         gmMm7.SetGlobalBuffer((__gm__ ElementC *)((__gm__ uint8_t*)params.ptrWorkspace + params.wsMm7Offset) + mm7RingOffset);
 
                         auto tensorDsTemp = tla::MakeTensor(gmDsTemp, MakeLayoutFromTag(layoutBTxBT_T), Arch::PositionGM{});

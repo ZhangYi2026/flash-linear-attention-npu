@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -34,6 +34,21 @@ constexpr int64_t CONST_BT = 64;
 constexpr size_t FP16_SIZE = 2;
 constexpr size_t FP32_SIZE = 4;
 
+constexpr size_t INPUT_Q_IDX = 0;
+constexpr size_t INPUT_K_IDX = 1;
+constexpr size_t INPUT_V_IDX = 2;
+constexpr size_t INPUT_G_IDX = 3;
+constexpr size_t INPUT_H_IDX = 4;
+constexpr size_t INPUT_DOX_IDX = 5;
+constexpr size_t INPUT_DH_IDX = 6;
+constexpr size_t INPUT_DV_IDX = 7;
+constexpr size_t INPUT_CUSEQLENS_IDX = 8;
+constexpr size_t INPUT_CHUNK_INDICES_IDX = 9;
+constexpr size_t INPUT_W_IDX = 10;
+constexpr size_t INPUT_G_GAMMA_IDX = 11;
+constexpr int ATTR_SCALE_ITEM = 0;
+constexpr int ATTR_CHUNK_SIZE_ITEM = 1;
+
 int64_t CeilDiv(int64_t a, int64_t b)
 {
     if (unlikely(b == 0)) {
@@ -43,14 +58,14 @@ int64_t CeilDiv(int64_t a, int64_t b)
 }
 
 ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* context) {
-    const gert::Shape qStorageShape = context->GetRequiredInputShape(0)->GetStorageShape();
-    const gert::Shape kStorageShape = context->GetRequiredInputShape(1)->GetStorageShape();
-    const gert::Shape vStorageShape = context->GetRequiredInputShape(2)->GetStorageShape();
-    const gert::Shape gStorageShape = context->GetRequiredInputShape(3)->GetStorageShape();
-    const gert::Shape hStorageShape = context->GetRequiredInputShape(4)->GetStorageShape();
-    const gert::Shape doxStorageShape = context->GetRequiredInputShape(5)->GetStorageShape();
-    const gert::Shape dhStorageShape = context->GetRequiredInputShape(6)->GetStorageShape();
-    const gert::Shape dvStorageShape = context->GetRequiredInputShape(7)->GetStorageShape();
+    const gert::Shape qStorageShape = context->GetRequiredInputShape(INPUT_Q_IDX)->GetStorageShape();
+    const gert::Shape kStorageShape = context->GetRequiredInputShape(INPUT_K_IDX)->GetStorageShape();
+    const gert::Shape vStorageShape = context->GetRequiredInputShape(INPUT_V_IDX)->GetStorageShape();
+    const gert::Shape gStorageShape = context->GetRequiredInputShape(INPUT_G_IDX)->GetStorageShape();
+    const gert::Shape hStorageShape = context->GetRequiredInputShape(INPUT_H_IDX)->GetStorageShape();
+    const gert::Shape doxStorageShape = context->GetRequiredInputShape(INPUT_DOX_IDX)->GetStorageShape();
+    const gert::Shape dhStorageShape = context->GetRequiredInputShape(INPUT_DH_IDX)->GetStorageShape();
+    const gert::Shape dvStorageShape = context->GetRequiredInputShape(INPUT_DV_IDX)->GetStorageShape();
 
     int64_t B = vStorageShape.GetDim(0);
     int64_t HV = vStorageShape.GetDim(1);   // value 侧 head 数 (v/g/h/do/dh/dv 及全部输出)
@@ -61,47 +76,47 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
     int64_t BT = CONST_BT;
     // GVA: HV = n_ratio * HK, n_ratio 由 q/v shape 自动推导
     if (HK == 0 || HV % HK != 0) {
-        std::cout << "HV must be a multiple of HK, but HV = " << HV << ", HK = " << HK << "." << std::endl;
+        OP_LOGE(context->GetNodeName(), "HV must be a multiple of HK, but HV = %ld, HK = %ld.", HV, HK);
         return ge::GRAPH_FAILED;
     }
     int64_t n_ratio = HV / HK;
-    (void)n_ratio;
     auto attr = context->GetAttrs();
-    const int ATTR_CHUNK_SIZE_ITEM = 1;
     const int32_t* chunkSizePtr = attr->GetAttrPointer<int32_t>(ATTR_CHUNK_SIZE_ITEM);
     if (chunkSizePtr != nullptr) {
         BT = *chunkSizePtr;
         if (BT != 64 && BT != 128) {
-            std::cout << "BT should be 64 or 128 ." << std::endl;
+            OP_LOGE(context->GetNodeName(), "BT should be 64 or 128, but got %ld.", BT);
             return ge::GRAPH_FAILED;
         }
 
     }
 
 
-    if (context->GetOptionalInputTensor(10) != nullptr || context->GetOptionalInputTensor(11) != nullptr) {
-        std::cout << "w and g_gamma should be set at nullptr." << std::endl;
+    if (context->GetOptionalInputTensor(INPUT_W_IDX) != nullptr ||
+        context->GetOptionalInputTensor(INPUT_G_GAMMA_IDX) != nullptr) {
+        OP_LOGE(context->GetNodeName(), "w and g_gamma should be set at nullptr.");
         return ge::GRAPH_FAILED;
     }
 
-    auto cuSeqlensTensor = context->GetOptionalInputTensor(8);
+    auto cuSeqlensTensor = context->GetOptionalInputTensor(INPUT_CUSEQLENS_IDX);
     int64_t numChunks = CeilDiv(T, BT);  // = 32
     int isVarLen = 0;
     if (cuSeqlensTensor != nullptr) {
-        auto cuChunkIndicesTensor = context->GetOptionalInputTensor(9);
-        const gert::StorageShape *chunkIndicesShape = context->GetOptionalInputShape(9);
+        auto cuChunkIndicesTensor = context->GetOptionalInputTensor(INPUT_CHUNK_INDICES_IDX);
+        OP_CHECK_NULL_WITH_CONTEXT(context, cuChunkIndicesTensor);
+        const gert::StorageShape *chunkIndicesShape = context->GetOptionalInputShape(INPUT_CHUNK_INDICES_IDX);
         OP_CHECK_NULL_WITH_CONTEXT(context, chunkIndicesShape);
         const gert::Shape chunkIndicesStorageShape = chunkIndicesShape->GetStorageShape();
         numChunks = chunkIndicesStorageShape.GetDim(0);
         if (numChunks % 2 != 0) {
-            std::cout << "numChunks should be even, but now is " << chunkIndicesStorageShape.GetDim(1) << "!" << std::endl;
+            OP_LOGE(context->GetNodeName(), "numChunks should be even, but now is %ld.", numChunks);
             return ge::GRAPH_FAILED;
         }
         numChunks /= 2;
         isVarLen = 1;
     }
     if (isVarLen == 1 && B != 1) {
-        std::cout << "varlen mode only support B = 1, but now B = " << B << "." << std::endl;
+        OP_LOGE(context->GetNodeName(), "varlen mode only support B = 1, but now B = %ld.", B);
         return ge::GRAPH_FAILED;
     }
     {
@@ -115,16 +130,17 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
             doxStorageShape.GetDim(0) != B || doxStorageShape.GetDim(1) != HV || doxStorageShape.GetDim(2) != T || doxStorageShape.GetDim(3) != V ||
             dhStorageShape.GetDim(0) != B || dhStorageShape.GetDim(1) != HV || dhStorageShape.GetDim(2) != numChunks || dhStorageShape.GetDim(3) != K || dhStorageShape.GetDim(4) != V ||
             dvStorageShape.GetDim(0) != B || dvStorageShape.GetDim(1) != HV || dvStorageShape.GetDim(2) != T || dvStorageShape.GetDim(3) != V) {
-            std::cout << "Input tensor shapes do not match expected dimensions!" << std::endl;
-            std::cout << "Expected: q,k [B,HK,T,K], v,dox,dv [B,HV,T,V], g [B,HV,T], h,dh [B,HV,NC,K,V]" << std::endl;
+            OP_LOGE(context->GetNodeName(),
+                "Input tensor shapes do not match expected dimensions. Expected: q,k [B,HK,T,K], "
+                "v,dox,dv [B,HV,T,V], g [B,HV,T], h,dh [B,HV,NC,K,V].");
             return ge::GRAPH_FAILED;
         }
         if (K != 128) {
-            std::cout << "K should be 128, but now K = " << K << "." << std::endl;
+            OP_LOGE(context->GetNodeName(), "K should be 128, but now K = %ld.", K);
             return ge::GRAPH_FAILED;
         }
         if (V != 128 && V != 256) {
-            std::cout << "V should be 128 or 256, but now V = " << V << "." << std::endl;
+            OP_LOGE(context->GetNodeName(), "V should be 128 or 256, but now V = %ld.", V);
             return ge::GRAPH_FAILED;
         }
 
@@ -134,11 +150,9 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
 
     // 计算 scale = 1.0 / sqrt(K)
     // float scale = 1.0f / std::sqrt(static_cast<float>(K));
-    const int ATTR_SCALE_ITEM = 0;
-
     const float* scalePtr = attr->GetAttrPointer<float>(ATTR_SCALE_ITEM);
     if (scalePtr == nullptr) {
-        std::cout << "scale should not be nullptr!" << std::endl;
+        OP_LOGE(context->GetNodeName(), "scale should not be nullptr.");
         return ge::GRAPH_FAILED;
     }
     float scale = *scalePtr;
@@ -169,16 +183,27 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
     const size_t mainMm5Size = static_cast<size_t>(B) * HV *T * K * FP16_SIZE;
     const size_t mainDsTempSize = static_cast<size_t>(B) * HV *T * BT * FP16_SIZE;
     const size_t mainWorkspaceSize = mainDgLastSize + mainMm5Size + mainDsTempSize;
+    const bool v256LargeWorkspace = (V == 256 && mainWorkspaceSize > static_cast<size_t>(512) * 1024 * 1024);
+    const bool v256GvaHighRatio = (BT == 64 && V == 256 && n_ratio >= 32);
+    const bool v256Bt128Large = (BT == 128 && V == 256 &&
+                                 mainWorkspaceSize > static_cast<size_t>(512) * 1024 * 1024);
+    const bool v256SmallMainWorkspace = (B == 1 && V == 256 && BT == 64 &&
+                                         mainWorkspaceSize <= static_cast<size_t>(64) * 1024 * 1024);
+    const bool useMainWorkspaceMode = v256SmallMainWorkspace;
 
-    // actualWorkspaceForDepth: 与下面真实分配完全一致 (short 环深自适应 = 2G, mm7 寄生 mm5 group 区, 不再 max)。
-    auto actualWorkspaceForDepth = [&](int64_t g) -> size_t {
-        int64_t shortD = (g / 2 >= 2) ? (g / 2) : 2;                 // 自适应 short = 2G, 地板 2
-        size_t shortBtxK = align32(static_cast<size_t>(ringCoreSlots) * shortD * HV *BT * K * FP16_SIZE);
-        size_t sharedBtxK = align32(static_cast<size_t>(ringCoreSlots) * g * HV *BT * K * FP16_SIZE);  // mm5+mm7 group
-        size_t groupBtb = align32(static_cast<size_t>(ringCoreSlots) * g * HV *BT * BT * FP16_SIZE);
-        size_t shortBtb = align32(static_cast<size_t>(ringCoreSlots) * shortD * HV *BT * BT * FP16_SIZE);
-        size_t dgLast = align32(static_cast<size_t>(ringCoreSlots) * g * HV *FP32_SIZE);
+    // actualWorkspaceForDepth: 与下面真实分配完全一致 (short 环深自适应 = exact 2G-1,
+    // depth=2 为紧凑 G=1 group 环, mm7 寄生 mm5 group 区, 不再 max)。
+    auto actualWorkspaceForDepthSlots = [&](int64_t slots, int64_t g) -> size_t {
+        int64_t shortD = (g / 2 > 1) ? (g / 2 - 1) : 1;              // exact 2G-1, floor 1
+        size_t shortBtxK = align32(static_cast<size_t>(slots) * shortD * HV *BT * K * FP16_SIZE);
+        size_t sharedBtxK = align32(static_cast<size_t>(slots) * g * HV *BT * K * FP16_SIZE);  // mm5+mm7 group
+        size_t groupBtb = align32(static_cast<size_t>(slots) * g * HV *BT * BT * FP16_SIZE);
+        size_t shortBtb = align32(static_cast<size_t>(slots) * shortD * HV *BT * BT * FP16_SIZE);
+        size_t dgLast = align32(static_cast<size_t>(slots) * g * HV *FP32_SIZE);
         return shortBtxK + sharedBtxK + groupBtb + shortBtb + dgLast;
+    };
+    auto actualWorkspaceForDepth = [&](int64_t g) -> size_t {
+        return actualWorkspaceForDepthSlots(ringCoreSlots, g);
     };
 
     // 选 G: 取 <= min(main, L2 驻留预算) 的最大 G。**memory-bound 关键 (msprof 实锤)**: 大 H/大 BT 的 case
@@ -187,8 +212,8 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
     // 仍能拿到 G=4。L2_RING_BUDGET 按 910B 实测取 (case_03 432MB 不劣 / case_11 604MB 劣之间), 跨设备可调。
     const size_t L2_RING_BUDGET = static_cast<size_t>(512) * 1024 * 1024;
     const size_t ringBudget = std::min(mainWorkspaceSize, L2_RING_BUDGET);
-    int64_t groupRingDepth = 4;
-    for (int64_t candidate : {16, 8, 4}) {
+    int64_t groupRingDepth = 2;
+    for (int64_t candidate : {16, 8, 4, 2}) {
         if (actualWorkspaceForDepth(candidate) <= ringBudget) {
             groupRingDepth = candidate;
             break;
@@ -211,35 +236,66 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
         actualWorkspaceForDepth(MIN_DEPTH_FOR_OVERLAP) <= mainWorkspaceSize) {
         groupRingDepth = MIN_DEPTH_FOR_OVERLAP;
     }
+    if (!useMainWorkspaceMode && v256LargeWorkspace && v256GvaHighRatio && groupRingDepth > 4) {
+        groupRingDepth = 4;
+    }
+    if (!useMainWorkspaceMode && v256Bt128Large && groupRingDepth < 16 &&
+        actualWorkspaceForDepth(16) <= mainWorkspaceSize) {
+        groupRingDepth = 16;
+    }
 
-    // short 环深自适应 (= 内核 DqkwgShortRingDepthFromGroup 同公式): dw/mm6/mul1 只需 2G-1 个 slot, 固定 8 严重过配。
-    // 大 H/大 BT 的 memory-bound case (G=1~2) 把 short 环砍掉一大半 -> 环贴近 L2 -> 缓解 FixPipe/MTE2 的 L2 miss。
-    const int64_t adaptiveShortDepth = (groupRingDepth / 2 >= 2) ? (groupRingDepth / 2) : 2;  // 2G (G=4→8 复现原值; G<4 收缩), 地板 2
-    const size_t shortBtxKSize = align32(static_cast<size_t>(ringCoreSlots) * adaptiveShortDepth * HV *BT * K * FP16_SIZE);
-    // mm7 改用 group 环 (与 mm5 同槽, 单写, stage B/D 时序错开), 故 mm5/mm7 共享区 = group 深度 (不再 max(group,short))。
-    const size_t sharedBtxKSize = align32(static_cast<size_t>(ringCoreSlots) * groupRingDepth * HV *BT * K * FP16_SIZE);
-    const size_t groupBtbSize = align32(static_cast<size_t>(ringCoreSlots) * groupRingDepth * HV *BT * BT * FP16_SIZE);
-    const size_t shortBtbSize = align32(static_cast<size_t>(ringCoreSlots) * adaptiveShortDepth * HV *BT * BT * FP16_SIZE);
-    size_t dgLastSize = align32(static_cast<size_t>(ringCoreSlots) * groupRingDepth * HV *FP32_SIZE);
+    while (ringCoreSlots > 1 && actualWorkspaceForDepthSlots(ringCoreSlots, groupRingDepth) > mainWorkspaceSize) {
+        --ringCoreSlots;
+    }
+    if (aicNum > ringCoreSlots) {
+        aicNum = ringCoreSlots;
+    }
 
     size_t offset = 0;
-    size_t wsDwOffset = offset;
-    offset += shortBtxKSize;
+    size_t wsDwOffset = 0;
+    size_t wsMm5Offset = 0;
+    size_t wsDsTempOffset = 0;
+    size_t wsMul1Offset = 0;
+    size_t wsDgLastOffset = 0;
+    size_t wsMm6Offset = 0;
+    size_t wsMm7Offset = 0;
+    size_t dgLastSize = 0;
+    if (useMainWorkspaceMode) {
+        groupRingDepth = 0;
+        ringCoreSlots = std::min(aicNum, coreLoops);
+        wsMm5Offset = offset;
+        offset += mainMm5Size;
+        wsDsTempOffset = offset;
+        offset += mainDsTempSize;
+        wsDgLastOffset = offset;
+        dgLastSize = mainDgLastSize;
+        offset += dgLastSize;
+        wsMm6Offset = wsMm5Offset;
+        wsMm7Offset = wsMm5Offset;
+    } else {
+        // short 环深自适应 (= 内核 DqkwgShortRingDepthFromGroup 同公式): dw/mm6/mul1 只需 2G-1 个 slot, 固定 8 严重过配。
+        // 大 H/大 BT 的 memory-bound case (G=1~2) 把 short 环砍掉一大半 -> 环贴近 L2 -> 缓解 FixPipe/MTE2 的 L2 miss。
+        const int64_t adaptiveShortDepth = (groupRingDepth / 2 > 1) ? (groupRingDepth / 2 - 1) : 1;  // exact 2G-1, floor 1
+        const size_t shortBtxKSize = align32(static_cast<size_t>(ringCoreSlots) * adaptiveShortDepth * HV *BT * K * FP16_SIZE);
+        // mm7 改用 group 环 (与 mm5 同槽, 单写, stage B/D 时序错开), 故 mm5/mm7 共享区 = group 深度 (不再 max(group,short))。
+        const size_t sharedBtxKSize = align32(static_cast<size_t>(ringCoreSlots) * groupRingDepth * HV *BT * K * FP16_SIZE);
+        const size_t groupBtbSize = align32(static_cast<size_t>(ringCoreSlots) * groupRingDepth * HV *BT * BT * FP16_SIZE);
+        const size_t shortBtbSize = align32(static_cast<size_t>(ringCoreSlots) * adaptiveShortDepth * HV *BT * BT * FP16_SIZE);
+        dgLastSize = align32(static_cast<size_t>(ringCoreSlots) * groupRingDepth * HV *FP32_SIZE);
 
-    size_t wsMm5Offset = offset;
-    offset += sharedBtxKSize;
-
-    size_t wsDsTempOffset = offset;
-    offset += groupBtbSize;
-
-    size_t wsMul1Offset = offset;
-    offset += shortBtbSize;
-
-    size_t wsDgLastOffset = offset;
-    offset += dgLastSize;
-
-    size_t wsMm6Offset = wsDwOffset;
-    size_t wsMm7Offset = wsMm5Offset;
+        wsDwOffset = offset;
+        offset += shortBtxKSize;
+        wsMm5Offset = offset;
+        offset += sharedBtxKSize;
+        wsDsTempOffset = offset;
+        offset += groupBtbSize;
+        wsMul1Offset = offset;
+        offset += shortBtbSize;
+        wsDgLastOffset = offset;
+        offset += dgLastSize;
+        wsMm6Offset = wsDwOffset;
+        wsMm7Offset = wsMm5Offset;
+    }
     size_t totalUserWorkspace = offset;
 
     // 设置 workspace 大小

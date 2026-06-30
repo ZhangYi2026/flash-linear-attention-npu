@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -62,17 +62,19 @@
  // depth in wsBtxKSyncSlotsPerHead; short depth is fixed here.
  constexpr uint32_t DqkwgShortRingDepth = 8;
 
- // short 环深自适应: dw/mm6/mul1 的存活窗口只需 2G-1 个 slot (G=groupRingDepth/4)。固定 8 是按最大 G=4 配的,
- // 但大 H / 大 BT 的 memory-bound case 实际 G=1~2 时, 深度 8 严重过配 -> 环装不进 L2 -> FixPipe/MTE2 疯狂 miss。
- // 按 G 收缩到 2G-1 (地板 2, 保证 G=1 时仍有双缓冲) 可大幅减小环、贴近 L2。cube/vector/tiling 必须用同一公式。
- __aicore__ inline uint32_t DqkwgShortRingDepthFromGroup(uint32_t groupRingDepth) {
-     uint32_t d = groupRingDepth / 2;               // = 2G (>= 2G-1 所需余量; G=4 时 =8 复现原值, G<4 时收缩)
-     return d >= 2 ? d : 2;                         // 地板 2 (G=1 仍保双缓冲)
- }
+ // short ring depth: dw/mm6/mul1 only need the exact live window, 2G-1
+ // slots. For historical group depths >= 4, G=groupRingDepth/4; depth 2 is
+ // the compact G=1 mode. Cube/vector/tiling must use the same formula.
+__aicore__ inline uint32_t DqkwgShortRingDepthFromGroup(uint32_t groupRingDepth) {
+    uint32_t d = groupRingDepth / 2;               // = 2G
+    return d > 1 ? d - 1 : 1;                      // exact 2G-1 lifetime, floor 1
+}
 
  // ---- chunk-group-major: group each core's chunks and run A->B->C->D in-group ----
- // G = crossRingDepth / 4. The final group may merge a small tail, so short
- // rings must have at least 2G-1 slots for the largest supported G=4.
+ // For historical depths >= 4, G = crossRingDepth / 4. Depth 2 is a compact
+ // G=1 layout: it keeps the same one-task group but removes the unused banks.
+ // The final group may merge a small tail, so short rings must have at least
+ // 2G-1 slots for the active G.
  __aicore__ inline uint32_t DqkwgGroupSizeFromRingDepth(uint32_t ringDepth) {
      uint32_t groupSize = ringDepth / 4;
      return groupSize == 0 ? 1 : groupSize;
@@ -83,6 +85,7 @@
  // match exactly.
  __aicore__ inline uint32_t DqkwgGroupEnd(uint32_t loopBase, uint32_t coreLoops, uint32_t coreNum, uint32_t ringDepth) {
      if (loopBase >= coreLoops || coreNum == 0) { return coreLoops; }
+     if (ringDepth == 0) { return coreLoops; }
      uint32_t groupSize = DqkwgGroupSizeFromRingDepth(ringDepth);
      uint32_t left = (coreLoops - loopBase + coreNum - 1) / coreNum;     // 本核从 loopBase 起还剩几个 chunk
      uint32_t take = (left <= 2 * groupSize - 1) ? left : groupSize;  // 尾巴合并: 剩 <=2G-1 整块取完
@@ -96,7 +99,8 @@
      uint32_t firstChunk = (coreNum != 0) ? ((loopBase - coreIdx) / coreNum) : 0;
      uint32_t parity = (firstChunk / groupSize) % 2;
      uint32_t pos = (coreNum != 0) ? ((loopIdx - loopBase) / coreNum) : 0;
-     uint64_t slotInCore = (uint64_t)parity * (2 * groupSize) + (uint64_t)pos;
+     uint32_t bankStride = (ringDepth >= 4) ? (2 * groupSize) : groupSize;
+     uint64_t slotInCore = (uint64_t)parity * bankStride + (uint64_t)pos;
      return (uint64_t)coreIdx * ringDepth + slotInCore;
  }
 
@@ -120,11 +124,32 @@
      return (slot * H + (uint64_t)h) * (BT * BT);
  }
 
- __aicore__ inline uint64_t DqkwgScalarRingElemOffset(uint32_t coreIdx, uint32_t loopBase, uint32_t loopIdx,
+__aicore__ inline uint64_t DqkwgScalarRingElemOffset(uint32_t coreIdx, uint32_t loopBase, uint32_t loopIdx,
                                                       uint32_t coreNum, uint32_t h, uint64_t H,
                                                       uint32_t ringDepth) {
      uint64_t slot = DqkwgGroupRingSlot(coreIdx, loopBase, loopIdx, coreNum, ringDepth);
      return slot * H + (uint64_t)h;
+ }
+
+ __aicore__ inline bool DqkwgUseMainWorkspace(uint32_t ringDepth) {
+     return ringDepth <= 1;
+ }
+
+ __aicore__ inline bool DqkwgUseStageMajorMainWorkspace(uint32_t ringDepth) {
+     return ringDepth == 0;
+ }
+
+ __aicore__ inline uint64_t DqkwgMainBtxKElemOffset(uint32_t h, uint32_t bos, uint64_t T, uint64_t K) {
+     return ((uint64_t)h * T + (uint64_t)bos) * K;
+ }
+
+ __aicore__ inline uint64_t DqkwgMainBtbElemOffset(uint32_t h, uint32_t bos, uint64_t T, uint64_t BT) {
+     return ((uint64_t)h * T + (uint64_t)bos) * BT;
+ }
+
+ __aicore__ inline uint64_t DqkwgMainScalarElemOffset(uint32_t bIdx, uint32_t h, uint32_t chunkIdx,
+                                                      uint64_t H, uint64_t numChunks) {
+     return (((uint64_t)bIdx * H + (uint64_t)h) * numChunks + (uint64_t)chunkIdx);
  }
 
  __aicore__ inline uint64_t DqkwgShortBtxKRingElemOffset(uint32_t coreIdx, uint32_t loopIdx, uint32_t coreNum,

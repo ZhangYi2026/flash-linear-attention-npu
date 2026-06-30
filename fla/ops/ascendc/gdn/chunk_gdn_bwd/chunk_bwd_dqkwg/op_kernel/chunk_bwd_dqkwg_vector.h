@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -231,7 +231,11 @@
      gmDsTemp.SetGlobalBuffer((__gm__ DataType *)((__gm__ uint8_t*)ptrWorkspace + wsDsTempOffset));
      gmMm6.SetGlobalBuffer((__gm__ DataType *)((__gm__ uint8_t*)ptrWorkspace + wsMm6Offset));
      gmMm7.SetGlobalBuffer((__gm__ DataType *)((__gm__ uint8_t*)ptrWorkspace + wsMm7Offset));
-     gmMul1.SetGlobalBuffer((__gm__ DataType *)((__gm__ uint8_t*)ptrWorkspace + wsMul1Offset));
+     if (DqkwgUseStageMajorMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead)) {
+         gmMul1.SetGlobalBuffer((__gm__ DataType *)ptrDq);
+     } else {
+         gmMul1.SetGlobalBuffer((__gm__ DataType *)((__gm__ uint8_t*)ptrWorkspace + wsMul1Offset));
+     }
  }
 
  // ============== 主处理函数 (CV 深融合: A -> B -> C -> D, 每 stage 内 chunk 级与 cube 流水) ==============
@@ -245,7 +249,9 @@
      uint32_t coreNum = aicCoreNum;
      uint32_t coreLoops = B * numChunks;
      uint32_t M = (coreIdx < coreLoops) ? ((coreLoops - 1 - coreIdx) / coreNum + 1) : 0;
-     uint32_t groupSize = DqkwgGroupSizeFromRingDepth((uint32_t)wsBtxKSyncSlotsPerHead);
+     uint32_t groupSize = DqkwgUseStageMajorMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead)
+         ? M
+         : DqkwgGroupSizeFromRingDepth((uint32_t)wsBtxKSyncSlotsPerHead);
      uint32_t preseed = M < groupSize ? M : groupSize;
      for (uint32_t i = 0; i < preseed; i++) {
          SetVecCredit();
@@ -468,8 +474,11 @@
      const uint32_t hDhSize = mul0RowNum * V;
      const uint32_t dwSize = BT * K;
      const uint32_t gSize = BT;
+     const bool mainWorkspaceMode = DqkwgUseMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead);
+     const bool stageMajorMainWorkspaceMode = DqkwgUseStageMajorMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead);
      // 诊断 (同 ProcessBVector): 大 case 缩小 mul1 GM 写, 配合 B 端缩小读, 把 mul1 整个往返流量去掉 (~3.2GB), 看 perf。
      const bool largeMemBound_diag =
+         (mainWorkspaceMode && !stageMajorMainWorkspaceMode) ||
          ((uint64_t)B * HV * T * K * 2 + (uint64_t)B * HV * T * BT * 2 + (uint64_t)B * HV * numChunks * 4) > (512ULL * 1024 * 1024);
      const uint32_t maxSize = (2 * hDhSize) > dwSize ? (2 * hDhSize) : dwSize;
 
@@ -533,11 +542,15 @@
                  }
                  uint64_t hOffset = ((bIdx * HV + h) * numChunks + chunkIdx) * K * V;
                  uint64_t dwOffset = (h * T + bos) * K;  // 最终输出 ptrDw 仍全局寻址
-                 uint64_t dwRingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
-                                                                       DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
+                 uint64_t dwRingOffset = mainWorkspaceMode
+                     ? dwOffset
+                     : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
+                                                    DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
 
-                 uint64_t dgLastOffset = DqkwgScalarRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV,
-                                                                   (uint32_t)wsBtxKSyncSlotsPerHead);
+                 uint64_t dgLastOffset = mainWorkspaceMode
+                     ? DqkwgMainScalarElemOffset(bIdx, h, chunkIdx, HV, numChunks)
+                     : DqkwgScalarRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV,
+                                                 (uint32_t)wsBtxKSyncSlotsPerHead);
 
                  // ===== dg_last = sum(h * dh) =====
                  // CV 融合优化: 在 cube-bound 的 stage A 算 (被 cube 的 2H 个 matmul 藏住), 写 wsDgLast;
@@ -579,17 +592,17 @@
                      PipeBarrier<PIPE_V>();
                      outQue1.EnQue(tensorDgLastOut);
                  }
-                 {
-                     auto tensorDgLastOut = outQue1.DeQue<float>();
-                     DataCopyParams dataCopyParams;
+                  {
+                      auto tensorDgLastOut = outQue1.DeQue<float>();
+                      DataCopyParams dataCopyParams;
                      dataCopyParams.blockCount = 1;
                      dataCopyParams.blockLen = sizeof(float);
                      dataCopyParams.srcStride = 0;
                      dataCopyParams.dstStride = 0;
                      DataCopyPad(gmDgLast[dgLastOffset], tensorDgLastOut, dataCopyParams);
-                     PipeBarrier<PIPE_MTE3>();
-                     outQue1.FreeTensor(tensorDgLastOut);
-                 }
+                      PipeBarrier<PIPE_MTE3>();
+                      outQue1.FreeTensor(tensorDgLastOut);
+                  }
 
                  // ===== dw = -dw, then vector-repair row-0 first block =====
                  {
@@ -600,7 +613,11 @@
                          SetFlag<HardEvent::V_MTE2>(evV2M);
                          WaitFlag<HardEvent::V_MTE2>(evV2M);
                      }
-                     DataCopy(tensorDwOut, gmDwWorkspace[dwRingOffset], dwSize_sub);
+                     if (mainWorkspaceMode) {
+                         DataCopy(tensorDwOut, gmDw[dwRingOffset], dwSize_sub);
+                     } else {
+                         DataCopy(tensorDwOut, gmDwWorkspace[dwRingOffset], dwSize_sub);
+                     }
                      {
                          TEventID evM2V = GetTPipePtr()->FetchEventID(HardEvent::MTE2_V);
                          SetFlag<HardEvent::MTE2_V>(evM2V);
@@ -652,9 +669,11 @@
                      continue;
                  }
                  uint64_t gOffset = (h * T + bos);   // 整 chunk 的 g (从原始 bos)
-                 uint64_t mul1Offset = DqkwgShortBtbRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT,
-                                                                   DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead)) +
-                                       static_cast<uint64_t>(BT_sub_start) * BT;
+                 uint64_t mul1Offset = stageMajorMainWorkspaceMode
+                     ? DqkwgMainBtbElemOffset(h, bos, T, BT)
+                     : DqkwgShortBtbRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT,
+                                                   DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
+                 mul1Offset += static_cast<uint64_t>(BT_sub_start) * BT;
 
                  {
                      auto tensorGIn = inQue3.AllocTensor<GType>();
@@ -749,10 +768,13 @@
 
      uint32_t dsSize_full = BT * BT;
      const uint32_t gSize = BT;
+     const bool mainWorkspaceMode = DqkwgUseMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead);
+     const bool stageMajorMainWorkspaceMode = DqkwgUseStageMajorMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead);
 
      // 大 memory-bound case: mul1 不走 GM, 改在 vector B 从输入 g 现读现算 (= A Part2 内核 ComputeMul1HalfFp32),
      // 省掉 mul1 的 [BT,BT] GM 往返 (~3.2GB for step2_12)。判据与 host tiling / vector A 同公式; 小 case 仍读 GM。
      const bool largeMemBound_diag =
+         (mainWorkspaceMode && !stageMajorMainWorkspaceMode) ||
          ((uint64_t)B * HV * T * K * 2 + (uint64_t)B * HV * T * BT * 2 + (uint64_t)B * HV * numChunks * 4) > (512ULL * 1024 * 1024);
 
      pipe->InitBuffer(inQue1, BUFFER_NUM, dsSize_full * sizeof(float));    // ds from Cube (含 reinterpret)
@@ -790,12 +812,18 @@
                  continue;
              }
              uint64_t gOffset = (h * T + bos);
-             uint64_t dsOffset = DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT,
-                                                        (uint32_t)wsBtxKSyncSlotsPerHead);
-             uint64_t mul1Offset = DqkwgShortBtbRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT,
-                                                               DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
-             uint64_t mm5Offset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
-                                                          (uint32_t)wsBtxKSyncSlotsPerHead);
+             uint64_t dsOffset = mainWorkspaceMode
+                 ? DqkwgMainBtbElemOffset(h, bos, T, BT)
+                 : DqkwgBtbRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT,
+                                          (uint32_t)wsBtxKSyncSlotsPerHead);
+             uint64_t mul1Offset = mainWorkspaceMode
+                 ? (stageMajorMainWorkspaceMode ? DqkwgMainBtbElemOffset(h, bos, T, BT) : 0)
+                 : DqkwgShortBtbRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT,
+                                               DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
+             uint64_t mm5Offset = mainWorkspaceMode
+                 ? DqkwgMainBtxKElemOffset(h, bos, T, K)
+                 : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
+                                           (uint32_t)wsBtxKSyncSlotsPerHead);
              uint64_t dgOffset = gOffset;
 
              {
@@ -934,6 +962,7 @@
 
      uint32_t dqSize = BT * K;
      const uint32_t gSize = BT;
+     const bool mainWorkspaceMode = DqkwgUseMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead);
 
      pipe->InitBuffer(inQue1, BUFFER_NUM, dqSize * sizeof(float));    // dq_inner from Cube
      pipe->InitBuffer(inQue2, BUFFER_NUM, dqSize * sizeof(float));    // q / mm6 复用
@@ -1062,8 +1091,10 @@
                  // dq += mm6 (从 wsMm6 环形区读取, dq_state 仍在 UB)
                  {
                      auto tensorMm6In = inQue2.AllocTensor<DataType>();
-                     uint64_t mm6RingOffset = DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
-                                                                           DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
+                     uint64_t mm6RingOffset = mainWorkspaceMode
+                         ? DqkwgMainBtxKElemOffset(h, bos, T, K)
+                         : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
+                                                        DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
                      DataCopy(tensorMm6In[dqSize_sub], gmMm6[mm6RingOffset], dqSize_sub);  // mm6 compact ring
                      inQue2.EnQue(tensorMm6In);
                  }
@@ -1106,6 +1137,7 @@
 
      uint32_t dkSize = BT * K;
      const uint32_t gSize = BT;
+     const bool mainWorkspaceMode = DqkwgUseMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead);
 
      constexpr int32_t part5BufferNum = 1;
      pipe->InitBuffer(inQue1, part5BufferNum, dkSize * sizeof(float));
@@ -1154,8 +1186,10 @@
              // 跨 stage 可见性由 Process() 中 A->B->C->D 的 PipeBarrier<PIPE_ALL> 保证; A(c,h)/D(c,h) 同 sub-block。
              // 输出格式与原重算一致: tensorGLastFp32Tmp[16..23] = 8 份 dg_last。
              {
-                 uint64_t dgLastOffset = DqkwgScalarRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV,
-                                                                   (uint32_t)wsBtxKSyncSlotsPerHead);
+                 uint64_t dgLastOffset = mainWorkspaceMode
+                     ? DqkwgMainScalarElemOffset(bIdx, h, chunkIdx, HV, numChunks)
+                     : DqkwgScalarRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV,
+                                                 (uint32_t)wsBtxKSyncSlotsPerHead);
                  {
                      DataCopyExtParams copyParams{1, sizeof(float), 0, 0, 0};
                      DataCopyPadExtParams<float> padParams{true, 0, 7, 0};
@@ -1250,12 +1284,12 @@
                  PipeBarrier<PIPE_V>();
                  WholeReduceSum(tensorDgFinal, tensorDgLastFp32Tmp, sum0SumCnt, 1, 1, 1, 8);
                  PipeBarrier<PIPE_V>();
-                 Brcb(tensorDgLastFp32Tmp, tensorDgFinal, 1, {1, 8});
-                 PipeBarrier<PIPE_V>();
-                 DataCopy(tensorDgFinal, tensorDgLastFp32Tmp, 8);
-                 PipeBarrier<PIPE_V>();
-                 Exp(tensorGLastFp32Tmp, tensorGLastFp32Tmp, 8);
-                 PipeBarrier<PIPE_V>();
+                  Brcb(tensorDgLastFp32Tmp, tensorDgFinal, 1, {1, 8});
+                  PipeBarrier<PIPE_V>();
+                  DataCopy(tensorDgFinal, tensorDgLastFp32Tmp, 8);
+                  PipeBarrier<PIPE_V>();
+                  Exp(tensorGLastFp32Tmp, tensorGLastFp32Tmp, 8);
+                  PipeBarrier<PIPE_V>();
                  Mul(tensorDgLastFp32Tmp[16], tensorGLastFp32Tmp[16], tensorGLastFp32Tmp, 8);
                  PipeBarrier<PIPE_V>();
                  Add(tensorDgLastFp32Tmp[16], tensorDgLastFp32Tmp[16], tensorDgFinal, 8);  // add4 = dg_last_term
@@ -1294,8 +1328,10 @@
                  // dk += mm7 (从 wsMm7 读取, dk_state 仍在 UB)
                  {
                      auto tensorMm7In = inQue2.AllocTensor<DataType>();
-                     uint64_t mm7RingOffset = DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
-                                                                      (uint32_t)wsBtxKSyncSlotsPerHead);  // mm7 用 group 环 (与 cube 一致)
+                     uint64_t mm7RingOffset = mainWorkspaceMode
+                         ? DqkwgMainBtxKElemOffset(h, bos, T, K)
+                         : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
+                                                   (uint32_t)wsBtxKSyncSlotsPerHead);  // mm7 用 group 环 (与 cube 一致)
                      DataCopy(tensorMm7In[dkSize], gmMm7[mm7RingOffset], dkSize);
                      inQue2.EnQue(tensorMm7In);
                  }
