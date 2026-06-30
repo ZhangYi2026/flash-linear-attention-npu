@@ -55,6 +55,7 @@
      __aicore__ inline void ProcessCVector(uint32_t loopBase, uint32_t loopEnd);  // 原 Part4 + Part6 (dq 最终)
      __aicore__ inline void ProcessDVector(uint32_t loopBase, uint32_t loopEnd);  // 原 Part5 + Part7 (dk 最终 + dg 最终)
      __aicore__ inline void ResetStagePipe();
+     __aicore__ inline void FenceGvaAccumReadAfterWrite();
 
      // mul1 一个 row-half 的计算 (= A 的 Part2 per-head 内核, 输出 fp32 到 outFp32[half] )。
      // A (小 case) 调它后 cast+写 GM; B (大 case) 调它两次 (两个 row-half) 后直接乘 ds, 省掉 mul1 GM 往返。
@@ -288,6 +289,13 @@
          AscendC::PipeBarrier<PIPE_MTE3>();
      }
      pipe->Reset();
+ }
+
+ template <typename DataType, typename GType>
+ __aicore__ inline void ChunkBwdDqkwgVectorProcess<DataType, GType>::FenceGvaAccumReadAfterWrite() {
+     TEventID eventId = GetTPipePtr()->FetchEventID(HardEvent::MTE3_MTE2);
+     SetFlag<HardEvent::MTE3_MTE2>(eventId);
+     WaitFlag<HardEvent::MTE3_MTE2>(eventId);
  }
 
  template <typename DataType, typename GType>
@@ -1116,6 +1124,7 @@
                      PipeBarrier<PIPE_V>();
                      inQue2.FreeTensor(tensorMm6InFp16);
                      if (gvaMode && (h % n_ratio != 0)) {
+                         FenceGvaAccumReadAfterWrite();
                          auto tensorDqAccumIn = inQue2.AllocTensor<DataType>();
                          DataCopy(tensorDqAccumIn[dqSize_sub], gmDq[dqOutOffset], dqSize_sub);
                          inQue2.EnQue(tensorDqAccumIn);
@@ -1374,6 +1383,7 @@
                      PipeBarrier<PIPE_V>();
                      inQue2.FreeTensor(tensorMm7In);
                      if (gvaMode && (h % n_ratio != 0)) {
+                         FenceGvaAccumReadAfterWrite();
                          auto tensorDkAccumIn = inQue2.AllocTensor<DataType>();
                          DataCopy(tensorDkAccumIn[dkSize], gmDk[dkOutOffset], dkSize);
                          inQue2.EnQue(tensorDkAccumIn);
