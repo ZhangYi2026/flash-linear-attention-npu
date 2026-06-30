@@ -950,7 +950,7 @@
  }
 
  // ============== C_vector: 原 Part4 + Part6 (dq 最终 + dg) ==============
- // C_cube 在一次 SetCubeReady 前已产出 dq_inner(ptrDq) 与 mm6(wsMm6); C_vector 一次 WaitCubeReady 后
+ // C_cube 在一次 SetCubeReady 前已产出 dq_inner 与 mm6(wsMm6); C_vector 一次 WaitCubeReady 后
  // 同时读取二者 (无 per-head phase 握手), 计算 dq_state/dg 并 dq += mm6。
  template <typename DataType, typename GType>
  __aicore__ inline void ChunkBwdDqkwgVectorProcess<DataType, GType>::ProcessCVector(uint32_t loopBase, uint32_t loopEnd) {
@@ -963,6 +963,7 @@
      uint32_t dqSize = BT * K;
      const uint32_t gSize = BT;
      const bool mainWorkspaceMode = DqkwgUseMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead);
+     const bool gvaMode = HV != HK;
 
      pipe->InitBuffer(inQue1, BUFFER_NUM, dqSize * sizeof(float));    // dq_inner from Cube
      pipe->InitBuffer(inQue2, BUFFER_NUM, dqSize * sizeof(float));    // q / mm6 复用
@@ -989,15 +990,19 @@
          WaitCubeReady();
 
          for (uint32_t h = 0; h < HV; h++) {
-             if (h % subBlockNum != subBlockIdx) {
+             uint32_t hk_idx = h / n_ratio;
+             uint32_t ownerHead = gvaMode ? hk_idx : h;
+             if (ownerHead % subBlockNum != subBlockIdx) {
                  continue;
              }
-             // GVA: q 为 HK 头, dq 为 HV 头
-             uint32_t hk_idx = h / n_ratio;
              uint32_t bIdx = loopIdx / numChunks;
              uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(HV - HK) * T;
              uint64_t qkOffset = (hk_idx * T + bos_hk) * K;   // q (HK)
-             uint64_t dqOffset = (h * T + bos) * K;           // dq (HV)
+             uint64_t dqOutOffset = (hk_idx * T + bos_hk) * K; // dq (HK)
+             uint64_t dqTempOffset = mainWorkspaceMode
+                 ? DqkwgMainBtxKElemOffset(h, bos, T, K)
+                 : DqkwgBtxKRingElemOffset(coreIdx, loopBase, loopIdx, coreNum, h, HV, BT, K,
+                                           (uint32_t)wsBtxKSyncSlotsPerHead);
              uint64_t gOffset = (h * T + bos);
 
              // CopyIn: dq_inner, q, g, dg
@@ -1006,7 +1011,11 @@
                  auto tensorQIn = inQue2.AllocTensor<DataType>();
                  auto tensorGIn = inQue3.AllocTensor<GType>();
                  auto tensorDgIn = inQue4.AllocTensor<GType>();
-                 DataCopy(tensorDqIn[dqSize_sub], gmDq[dqOffset], dqSize_sub);
+                 if (gvaMode) {
+                     DataCopy(tensorDqIn[dqSize_sub], gmMm5[dqTempOffset], dqSize_sub);
+                 } else {
+                     DataCopy(tensorDqIn[dqSize_sub], gmDq[dqOutOffset], dqSize_sub);
+                 }
                  DataCopy(tensorQIn[dqSize_sub], gmQ[qkOffset], dqSize_sub);
                  CopyGateWithPad(tensorGIn, gmG, gOffset, actual_chunk_len, gSize);
                  CopyGateWithPad(tensorDgIn, gmDg, gOffset, actual_chunk_len, gSize);
@@ -1101,19 +1110,31 @@
                  {
                      auto tensorMm6InFp16 = inQue2.DeQue<DataType>();
                      auto tensorMm6Fp32 = tensorMm6InFp16.template ReinterpretCast<float>();
-                     auto tensorDqOut = outQue1.AllocTensor<DataType>();
                      Cast(tensorMm6Fp32, tensorMm6InFp16[dqSize_sub], RoundMode::CAST_NONE, dqSize_sub);
                      PipeBarrier<PIPE_V>();
                      Add(tensorDqInFp32, tensorDqInFp32, tensorMm6Fp32, dqSize_sub);
                      PipeBarrier<PIPE_V>();
+                     inQue2.FreeTensor(tensorMm6InFp16);
+                     if (gvaMode && (h % n_ratio != 0)) {
+                         auto tensorDqAccumIn = inQue2.AllocTensor<DataType>();
+                         DataCopy(tensorDqAccumIn[dqSize_sub], gmDq[dqOutOffset], dqSize_sub);
+                         inQue2.EnQue(tensorDqAccumIn);
+                         auto tensorDqAccumInFp16 = inQue2.DeQue<DataType>();
+                         auto tensorDqAccumFp32 = tensorDqAccumInFp16.template ReinterpretCast<float>();
+                         Cast(tensorDqAccumFp32, tensorDqAccumInFp16[dqSize_sub], RoundMode::CAST_NONE, dqSize_sub);
+                         PipeBarrier<PIPE_V>();
+                         Add(tensorDqInFp32, tensorDqInFp32, tensorDqAccumFp32, dqSize_sub);
+                         PipeBarrier<PIPE_V>();
+                         inQue2.FreeTensor(tensorDqAccumInFp16);
+                     }
+                     auto tensorDqOut = outQue1.AllocTensor<DataType>();
                      Cast(tensorDqOut, tensorDqInFp32, RoundMode::CAST_RINT, dqSize_sub);
                      inQue1.FreeTensor(tensorDqInFp16);
-                     inQue2.FreeTensor(tensorMm6InFp16);
                      outQue1.EnQue(tensorDqOut);
                  }
                  {
                      auto tensorDqOut = outQue1.DeQue<DataType>();
-                     DataCopy(gmDq[dqOffset], tensorDqOut, dqSize_sub);
+                     DataCopy(gmDq[dqOutOffset], tensorDqOut, dqSize_sub);
                      outQue1.FreeTensor(tensorDqOut);
                  }
              }
@@ -1125,7 +1146,7 @@
  }
 
  // ============== D_vector: 原 Part5 + Part7 (dk 最终 + dg 最终) ==============
- // D_cube 在一次 SetCubeReady 前已产出 dk_inner(ptrDk) 与 mm7(wsMm7); D_vector 一次 WaitCubeReady 后
+ // D_cube 在一次 SetCubeReady 前已产出 dk_inner 与 mm7(wsMm7); D_vector 一次 WaitCubeReady 后
  // 读取二者, 完成 dk_state / dg 最终 / dk += mm7。dg_last 本地重算 (与原 Part5 一致)。
  template <typename DataType, typename GType>
  __aicore__ inline void ChunkBwdDqkwgVectorProcess<DataType, GType>::ProcessDVector(uint32_t loopBase, uint32_t loopEnd) {
@@ -1138,6 +1159,7 @@
      uint32_t dkSize = BT * K;
      const uint32_t gSize = BT;
      const bool mainWorkspaceMode = DqkwgUseMainWorkspace((uint32_t)wsBtxKSyncSlotsPerHead);
+     const bool gvaMode = HV != HK;
 
      constexpr int32_t part5BufferNum = 1;
      pipe->InitBuffer(inQue1, part5BufferNum, dkSize * sizeof(float));
@@ -1172,14 +1194,18 @@
          WaitCubeReady();
 
          for (uint32_t h = 0; h < HV; h++) {
-             if (h % subBlockNum != subBlockIdx) {
+             uint32_t hk_idx = h / n_ratio;
+             uint32_t ownerHead = gvaMode ? hk_idx : h;
+             if (ownerHead % subBlockNum != subBlockIdx) {
                  continue;
              }
-             // GVA: k 为 HK 头, dk 为 HV 头
-             uint32_t hk_idx = h / n_ratio;
              uint64_t bos_hk = bos - static_cast<uint64_t>(bIdx) * static_cast<uint64_t>(HV - HK) * T;
              uint64_t kOffset = (hk_idx * T + bos_hk) * K;    // k (HK)
-             uint64_t dkOffset = (h * T + bos) * K;           // dk (HV)
+             uint64_t dkOutOffset = (hk_idx * T + bos_hk) * K; // dk (HK)
+             uint64_t dkTempOffset = mainWorkspaceMode
+                 ? DqkwgMainBtxKElemOffset(h, bos, T, K)
+                 : DqkwgShortBtxKRingElemOffset(coreIdx, loopIdx, coreNum, h, HV, BT, K,
+                                                DqkwgShortRingDepthFromGroup((uint32_t)wsBtxKSyncSlotsPerHead));
              uint64_t gOffset = (h * T + bos);
 
              // CV 融合优化: 读 A_vector 算好的 dg_last = sum(h*dh) (替代本地重算, 省 D 的 h/dh 读 + K*V 归约)。
@@ -1208,7 +1234,11 @@
                  auto tensorKIn = inQue2.AllocTensor<DataType>();
                  auto tensorGIn = inQue3.AllocTensor<GType>();
                  auto tensorDgIn = inQue4.AllocTensor<GType>();
-                 DataCopy(tensorDkIn[dkSize], gmDk[dkOffset], dkSize);
+                 if (gvaMode) {
+                     DataCopy(tensorDkIn[dkSize], gmMm6[dkTempOffset], dkSize);
+                 } else {
+                     DataCopy(tensorDkIn[dkSize], gmDk[dkOutOffset], dkSize);
+                 }
                  DataCopy(tensorKIn[dkSize], gmK[kOffset], dkSize);
                  CopyGateWithPad(tensorGIn, gmG, gOffset, actual_chunk_len, gSize);
                  CopyGateWithPad(tensorDgIn, gmDg, gOffset, actual_chunk_len, gSize);
@@ -1338,19 +1368,31 @@
                  {
                      auto tensorMm7In = inQue2.DeQue<DataType>();
                      auto tensorMm7Fp32 = tensorMm7In.template ReinterpretCast<float>();
-                     auto tensorDkOut = outQue1.AllocTensor<DataType>();
                      Cast(tensorMm7Fp32, tensorMm7In[dkSize], RoundMode::CAST_NONE, dkSize);
                      PipeBarrier<PIPE_V>();
                      Add(tensorDkFp32, tensorDkFp32, tensorMm7Fp32, dkSize);
                      PipeBarrier<PIPE_V>();
+                     inQue2.FreeTensor(tensorMm7In);
+                     if (gvaMode && (h % n_ratio != 0)) {
+                         auto tensorDkAccumIn = inQue2.AllocTensor<DataType>();
+                         DataCopy(tensorDkAccumIn[dkSize], gmDk[dkOutOffset], dkSize);
+                         inQue2.EnQue(tensorDkAccumIn);
+                         auto tensorDkAccumInFp16 = inQue2.DeQue<DataType>();
+                         auto tensorDkAccumFp32 = tensorDkAccumInFp16.template ReinterpretCast<float>();
+                         Cast(tensorDkAccumFp32, tensorDkAccumInFp16[dkSize], RoundMode::CAST_NONE, dkSize);
+                         PipeBarrier<PIPE_V>();
+                         Add(tensorDkFp32, tensorDkFp32, tensorDkAccumFp32, dkSize);
+                         PipeBarrier<PIPE_V>();
+                         inQue2.FreeTensor(tensorDkAccumInFp16);
+                     }
+                     auto tensorDkOut = outQue1.AllocTensor<DataType>();
                      Cast(tensorDkOut, tensorDkFp32, RoundMode::CAST_RINT, dkSize);
                      inQue1.FreeTensor(tensorDkIn);
-                     inQue2.FreeTensor(tensorMm7In);
                      outQue1.EnQue(tensorDkOut);
                  }
                  {
                      auto tensorDkOut = outQue1.DeQue<DataType>();
-                     DataCopy(gmDk[dkOffset], tensorDkOut, dkSize);
+                     DataCopy(gmDk[dkOutOffset], tensorDkOut, dkSize);
                      outQue1.FreeTensor(tensorDkOut);
                  }
              }

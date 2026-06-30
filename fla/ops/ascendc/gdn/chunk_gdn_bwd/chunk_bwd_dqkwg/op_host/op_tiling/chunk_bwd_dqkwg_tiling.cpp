@@ -68,7 +68,7 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
     const gert::Shape dvStorageShape = context->GetRequiredInputShape(INPUT_DV_IDX)->GetStorageShape();
 
     int64_t B = vStorageShape.GetDim(0);
-    int64_t HV = vStorageShape.GetDim(1);   // value 侧 head 数 (v/g/h/do/dh/dv 及全部输出)
+    int64_t HV = vStorageShape.GetDim(1);   // value 侧 head 数 (v/g/h/do/dh/dv/dw/dg)
     int64_t T = vStorageShape.GetDim(2);
     int64_t HK = kStorageShape.GetDim(1);   // key/query 侧 head 数 (q/k)
     int64_t K = kStorageShape.GetDim(3);
@@ -189,7 +189,7 @@ ASCENDC_EXTERN_C ge::graphStatus TilingChunkBwdDqkwg(gert::TilingContext* contex
                                  mainWorkspaceSize > static_cast<size_t>(512) * 1024 * 1024);
     const bool v256SmallMainWorkspace = (B == 1 && V == 256 && BT == 64 &&
                                          mainWorkspaceSize <= static_cast<size_t>(64) * 1024 * 1024);
-    const bool useMainWorkspaceMode = v256SmallMainWorkspace;
+    const bool useMainWorkspaceMode = v256SmallMainWorkspace && n_ratio == 1;
 
     // actualWorkspaceForDepth: 与下面真实分配完全一致 (short 环深自适应 = exact 2G-1,
     // depth=2 为紧凑 G=1 group 环, mm7 寄生 mm5 group 区, 不再 max)。

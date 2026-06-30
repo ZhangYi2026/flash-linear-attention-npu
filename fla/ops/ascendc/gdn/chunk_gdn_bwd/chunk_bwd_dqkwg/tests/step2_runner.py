@@ -36,6 +36,7 @@ ATOL_DEFAULT = 1e-2
 RTOL_DEFAULT = 1e-2
 SEED_BASE = 20240617
 USE_EXP2_KWARG = True
+DQ_DK_HEAD_SEMANTICS = "key_heads"
 
 
 RAW_CASES = {
@@ -261,6 +262,8 @@ def cache_complete(case_dir, spec):
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except Exception:
         return False
+    if meta.get("dq_dk_head_semantics") != DQ_DK_HEAD_SEMANTICS:
+        return False
     keys = ("seed", "cu_seed", "B", "HV", "HK", "T", "K", "V", "chunk_size", "dtype", "Gtype", "scale", "cu_seqlens", "num_chunks")
     if any(meta.get(key) != spec.get(key) for key in keys):
         return False
@@ -322,6 +325,7 @@ def generate_cache(case_name, spec, cache_root, cpu_ref, refresh=False):
         {
             "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "generation_seconds": elapsed,
+            "dq_dk_head_semantics": DQ_DK_HEAD_SEMANTICS,
             "input_files": list(INPUT_NAMES),
             "output_files": list(OUTPUT_NAMES),
         }

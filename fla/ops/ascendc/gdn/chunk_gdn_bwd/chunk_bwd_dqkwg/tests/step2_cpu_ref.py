@@ -112,13 +112,15 @@ def chunk_bwd_dqkwg_cpu(
     B, T, HK, K = q.shape
     HV = v.shape[2]
     V = v.shape[-1]
+    if HK <= 0 or HV <= 0 or HV % HK != 0:
+        raise ValueError(f"GVA requires HV divisible by HK, got HV={HV}, HK={HK}")
     n_ratio = HV // HK  # HV = n_ratio * HK
 
     g_gamma = None
     
-    # 输出使用 HV 维度
-    dq = torch.zeros((B, T, HV, K), dtype=datatype)
-    dk = torch.zeros((B, T, HV, K), dtype=datatype)
+    # dq/dk use key heads; dw/dg still use value heads.
+    dq = torch.zeros((B, T, HK, K), dtype=datatype)
+    dk = torch.zeros((B, T, HK, K), dtype=datatype)
     dg = torch.zeros_like(g) if g is not None else None
     dw = torch.zeros((B, T, HV, K), dtype=datatype)
     w = torch.zeros((B, T, HV, K), dtype=datatype)
@@ -358,8 +360,14 @@ def chunk_bwd_dqkwg_cpu(
                     # print(h_idx,i_t,"dk_total",dk_total)
 
 
-                dq[b_idx, chunk_start_token_idx:chunk_end_token_idx, h_idx, :] = dq_total
-                dk[b_idx, chunk_start_token_idx:chunk_end_token_idx, h_idx, :] = dk_total
+                if h_idx % n_ratio == 0:
+                    dq[b_idx, chunk_start_token_idx:chunk_end_token_idx, hk_idx, :] = dq_total.to(datatype)
+                    dk[b_idx, chunk_start_token_idx:chunk_end_token_idx, hk_idx, :] = dk_total.to(datatype)
+                else:
+                    dq_prev = dq[b_idx, chunk_start_token_idx:chunk_end_token_idx, hk_idx, :].to(calc_type)
+                    dk_prev = dk[b_idx, chunk_start_token_idx:chunk_end_token_idx, hk_idx, :].to(calc_type)
+                    dq[b_idx, chunk_start_token_idx:chunk_end_token_idx, hk_idx, :] = (dq_prev + dq_total).to(datatype)
+                    dk[b_idx, chunk_start_token_idx:chunk_end_token_idx, hk_idx, :] = (dk_prev + dk_total).to(datatype)
 
                 # if RANDOM_DATA == False:
                 #     pass
